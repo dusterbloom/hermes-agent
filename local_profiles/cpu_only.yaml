@@ -1,0 +1,29 @@
+name: "CPU Only (No GPU)"
+description: "Systems without dedicated GPU or insufficient VRAM"
+
+recommended_models:
+  main:
+    - name: "qwen2.5:3b-instruct-q4_K_M"
+      context: 8192
+      description: "Lightweight model for CPU inference"
+    - name: "phi-4:q4_K_M"
+      context: 8192
+      description: "Small but capable"
+    - name: "llama-3.2:1b-instruct-q8_0"
+      context: 4096
+      description: "Minimal — use if RAM is limited"
+
+  auxiliary: []  # use main model for everything
+
+search:
+  backend: "searxng"
+  setup: "docker run -d -p 8888:8080 searxng/searxng"
+
+server:
+  recommended: "ollama"
+  alternatives: ["llama-cpp"]
+
+notes: |
+  CPU inference is slow but functional. Expect 5-15 tokens/second
+  with a 3B model on a modern CPU. Use smaller models and shorter
+  context lengths for better responsiveness.

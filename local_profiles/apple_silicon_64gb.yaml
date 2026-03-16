@@ -1,0 +1,33 @@
+name: "Apple Silicon — 64GB+ Unified Memory (M1 Max/Ultra, M2 Max/Ultra, M3 Max, M4 Max)"
+unified_memory_range: [60000, 200000]
+description: "High-end Apple Silicon Mac"
+
+recommended_models:
+  main:
+    - name: "qwen2.5-coder:32b-instruct-q6_K"
+      context: 65536
+      description: "Top coding model with long context"
+    - name: "hermes-3:70b-q4_K_M"
+      context: 32768
+      description: "Full 70B model for complex tasks"
+    - name: "qwen2.5:72b-instruct-q4_K_M"
+      context: 32768
+      description: "Largest Qwen model"
+
+  auxiliary:
+    - name: "qwen2.5:7b-instruct-q4_K_M"
+      description: "Strong auxiliary for all tasks"
+
+  vision:
+    - name: "llava:13b-v1.6-q4_K_M"
+      description: "High-quality vision analysis"
+    - name: "qwen2-vl:7b-instruct-q6_K"
+      description: "Qwen Vision-Language"
+
+search:
+  backend: "searxng"
+  setup: "docker run -d -p 8888:8080 searxng/searxng"
+
+server:
+  recommended: "lm-studio"
+  alternatives: ["ollama"]

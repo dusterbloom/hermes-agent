@@ -1,0 +1,36 @@
+# RTX 3090 (24GB VRAM) — Recommended local configuration
+name: "RTX 3090 / RTX 4090 (24GB VRAM)"
+gpu_vram_range: [20000, 25000]  # MB
+description: "High-end NVIDIA GPU with 24GB VRAM"
+
+recommended_models:
+  main:
+    - name: "qwen2.5-coder:32b-instruct-q4_K_M"
+      context: 32768
+      description: "Best coding model that fits in 24GB"
+    - name: "hermes-3:70b-q4_K_M"
+      context: 16384
+      description: "Hermes 3 70B for general tasks (tight fit)"
+    - name: "qwen2.5:14b-instruct-q6_K"
+      context: 65536
+      description: "Balanced: good quality + long context"
+
+  auxiliary:
+    - name: "qwen2.5:3b-instruct-q8_0"
+      description: "Fast auxiliary for compression/summarization"
+    - name: "phi-4:q4_K_M"
+      description: "Small but capable auxiliary"
+
+  vision:
+    - name: "llava:13b-v1.6-q4_K_M"
+      description: "Vision analysis"
+    - name: "qwen2-vl:7b-instruct-q4_K_M"
+      description: "Qwen Vision-Language"
+
+search:
+  backend: "searxng"
+  setup: "docker run -d -p 8888:8080 searxng/searxng"
+
+server:
+  recommended: "ollama"
+  alternatives: ["vllm", "lm-studio"]

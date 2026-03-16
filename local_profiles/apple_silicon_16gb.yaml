@@ -1,0 +1,27 @@
+name: "Apple Silicon — 16GB Unified Memory (M1/M2/M3)"
+unified_memory_range: [14000, 18000]
+description: "Entry-level Apple Silicon Mac"
+
+recommended_models:
+  main:
+    - name: "qwen2.5-coder:7b-instruct-q4_K_M"
+      context: 16384
+      description: "Best coding model for 16GB"
+    - name: "hermes-3:8b-q4_K_M"
+      context: 16384
+      description: "Hermes 3 8B for general tasks"
+    - name: "llama-3.2:3b-instruct-q8_0"
+      context: 32768
+      description: "Lightweight with longer context"
+
+  auxiliary:
+    - name: "qwen2.5:0.5b-instruct"
+      description: "Minimal auxiliary for compression"
+
+search:
+  backend: "searxng"
+  setup: "docker run -d -p 8888:8080 searxng/searxng"
+
+server:
+  recommended: "ollama"
+  alternatives: ["lm-studio"]

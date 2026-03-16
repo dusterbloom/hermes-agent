@@ -1,0 +1,31 @@
+name: "Apple Silicon — 32GB Unified Memory (M1 Pro/Max, M2 Pro)"
+unified_memory_range: [28000, 36000]
+description: "Mid-range Apple Silicon Mac"
+
+recommended_models:
+  main:
+    - name: "qwen2.5-coder:14b-instruct-q6_K"
+      context: 32768
+      description: "Strong coding model with good context"
+    - name: "qwen2.5:32b-instruct-q4_K_M"
+      context: 16384
+      description: "Larger model for complex reasoning"
+    - name: "hermes-3:8b-q8_0"
+      context: 65536
+      description: "High quality 8B with max context"
+
+  auxiliary:
+    - name: "qwen2.5:3b-instruct-q4_K_M"
+      description: "Capable auxiliary model"
+
+  vision:
+    - name: "llava:7b-v1.6-q4_K_M"
+      description: "Vision analysis"
+
+search:
+  backend: "searxng"
+  setup: "docker run -d -p 8888:8080 searxng/searxng"
+
+server:
+  recommended: "lm-studio"
+  alternatives: ["ollama"]
