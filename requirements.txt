@@ -19,6 +19,7 @@ PyJWT[crypto]
 # Web tools
 firecrawl-py
 parallel-web>=0.4.2
+trafilatura
 
 # Image generation
 fal-client

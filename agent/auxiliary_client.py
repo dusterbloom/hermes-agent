@@ -12,7 +12,8 @@ Resolution order for text tasks (auto mode):
      wrapped to look like a chat.completions client)
   5. Native Anthropic
   6. Direct API-key providers (z.ai/GLM, Kimi/Moonshot, MiniMax, MiniMax-CN)
-  7. None
+  7. Local model (OPENAI_BASE_URL + OPENAI_MODEL, api_key defaults to "local")
+  8. None
 
 Resolution order for vision/multimodal tasks (auto mode):
   1. Selected main provider, if it is one of the supported vision backends below
@@ -21,7 +22,8 @@ Resolution order for vision/multimodal tasks (auto mode):
   4. Codex OAuth (gpt-5.3-codex supports vision via Responses API)
   5. Native Anthropic
   6. Custom endpoint (for local vision models: Qwen-VL, LLaVA, Pixtral, etc.)
-  7. None
+  7. Local model (OPENAI_BASE_URL + OPENAI_MODEL, only if model supports vision)
+  8. None
 
 Per-task provider overrides (e.g. AUXILIARY_VISION_PROVIDER,
 CONTEXT_COMPRESSION_PROVIDER) can force a specific provider for each task.
@@ -635,6 +637,46 @@ def _try_custom_endpoint() -> Tuple[Optional[OpenAI], Optional[str]]:
     return OpenAI(api_key=custom_key, base_url=custom_base), model
 
 
+def _try_local_vision() -> Tuple[Optional[OpenAI], Optional[str]]:
+    """Try local model for vision tasks.
+
+    Unlike _try_custom_endpoint, this does not require OPENAI_API_KEY to be set
+    (defaults to "local") and only succeeds if the configured model is known to
+    support vision input.
+    """
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    if not base_url:
+        return None, None
+    model_name = os.environ.get("OPENAI_MODEL", "")
+    if not model_name:
+        return None, None
+    from agent.model_capabilities import supports_vision
+    if not supports_vision(model_name):
+        logger.debug("Local model '%s' does not support vision", model_name)
+        return None, None
+    api_key = os.environ.get("OPENAI_API_KEY", "local")
+    logger.info("Using local model for vision: %s", model_name)
+    return OpenAI(base_url=base_url, api_key=api_key), model_name
+
+
+def _try_local_text() -> Tuple[Optional[OpenAI], Optional[str]]:
+    """Try local model for text auxiliary tasks.
+
+    Unlike _try_custom_endpoint, this does not require OPENAI_API_KEY to be set
+    (defaults to "local").  Useful for Ollama and other local servers that do
+    not need an API key.
+    """
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    if not base_url:
+        return None, None
+    model = os.environ.get("OPENAI_MODEL", os.environ.get("AUXILIARY_TEXT_MODEL", ""))
+    if not model:
+        return None, None
+    api_key = os.environ.get("OPENAI_API_KEY", "local")
+    logger.info("Using local model for auxiliary text task: %s", model)
+    return OpenAI(base_url=base_url, api_key=api_key), model
+
+
 def _try_codex() -> Tuple[Optional[Any], Optional[str]]:
     codex_token = _read_codex_access_token()
     if not codex_token:
@@ -689,17 +731,30 @@ def _resolve_forced_provider(forced: str) -> Tuple[Optional[OpenAI], Optional[st
         logger.warning("auxiliary.provider=main but no main endpoint credentials found")
         return None, None
 
+    if forced == "local":
+        # "local" = use OPENAI_BASE_URL unconditionally (no vision capability check).
+        base_url = os.environ.get("OPENAI_BASE_URL", "")
+        if not base_url:
+            logger.warning("auxiliary.provider=local but OPENAI_BASE_URL not set")
+            return None, None
+        api_key = os.environ.get("OPENAI_API_KEY", "local")
+        model = os.environ.get("AUXILIARY_VISION_MODEL",
+                               os.environ.get("OPENAI_MODEL", ""))
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        logger.info("Using local model (forced): %s", model)
+        return client, model
+
     # Unknown provider name — fall through to auto
     logger.warning("Unknown auxiliary.provider=%r, falling back to auto", forced)
     return None, None
 
 
 def _resolve_auto() -> Tuple[Optional[OpenAI], Optional[str]]:
-    """Full auto-detection chain: OpenRouter → Nous → custom → Codex → API-key → None."""
+    """Full auto-detection chain: OpenRouter → Nous → custom → Codex → API-key → local → None."""
     global auxiliary_is_nous
     auxiliary_is_nous = False  # Reset — _try_nous() will set True if it wins
     for try_fn in (_try_openrouter, _try_nous, _try_custom_endpoint,
-                   _try_codex, _resolve_api_key_provider):
+                   _try_codex, _resolve_api_key_provider, _try_local_text):
         client, model = try_fn()
         if client is not None:
             return client, model
@@ -989,6 +1044,7 @@ _VISION_AUTO_PROVIDER_ORDER = (
     "openai-codex",
     "anthropic",
     "custom",
+    "local",
 )
 
 
@@ -1013,6 +1069,8 @@ def _resolve_strict_vision_backend(provider: str) -> Tuple[Optional[Any], Option
         return _try_anthropic()
     if provider == "custom":
         return _try_custom_endpoint()
+    if provider == "local":
+        return _try_local_vision()
     return None, None
 
 

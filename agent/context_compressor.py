@@ -3,6 +3,11 @@
 Self-contained class with its own OpenAI client for summarization.
 Uses Gemini Flash (cheap/fast) to summarize middle turns while
 protecting head and tail context.
+
+Local model support:
+  Set CONTEXT_COMPRESSION_PROVIDER=local to skip cloud providers and use
+  the OPENAI_BASE_URL endpoint directly.  When no cloud provider is
+  available the compressor also auto-falls back to the local endpoint.
 """
 
 import logging
@@ -26,6 +31,14 @@ SUMMARY_PREFIX = (
     "avoid repeating work:"
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+
+# Simpler prompt for local/small models that may have limited context windows.
+_LOCAL_COMPRESSION_PROMPT = """Summarize this conversation concisely. Keep key facts, decisions, and code references. Remove repetition.
+
+Conversation:
+{conversation}
+
+Summary (start with "[CONTEXT SUMMARY]:")"""
 
 
 class ContextCompressor:
@@ -65,6 +78,9 @@ class ContextCompressor:
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
 
+        # Track whether we're using a local model so we can pick the right prompt.
+        self._using_local_model: bool = False
+
         self.summary_model = summary_model_override or ""
 
     def update_from_response(self, usage: Dict[str, Any]):
@@ -93,6 +109,31 @@ class ContextCompressor:
             "compression_count": self.compression_count,
         }
 
+    def _try_local_model(self):
+        """Build a client from OPENAI_BASE_URL for local model compression.
+
+        Returns (client, model) or (None, None) if OPENAI_BASE_URL is not set.
+        Sets self._using_local_model = True on success.
+        """
+        base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+        if not base_url:
+            return None, None
+        api_key = os.environ.get("OPENAI_API_KEY", "local")
+        model = (
+            os.environ.get("OPENAI_MODEL")
+            or os.environ.get("LLM_MODEL")
+            or self.model
+        )
+        try:
+            from openai import OpenAI as _OpenAI
+            client = _OpenAI(base_url=base_url, api_key=api_key)
+            self._using_local_model = True
+            logger.info("Using local model for context compression: %s via %s", model, base_url)
+            return client, model
+        except Exception as exc:
+            logger.debug("Could not build local compression client: %s", exc)
+            return None, None
+
     def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]]) -> Optional[str]:
         """Generate a concise summary of conversation turns.
 
@@ -114,7 +155,12 @@ class ContextCompressor:
             parts.append(f"[{role.upper()}]: {content}")
 
         content_to_summarize = "\n\n".join(parts)
-        prompt = f"""Create a concise handoff summary for a later assistant that will continue this conversation after earlier turns are compacted.
+
+        # Use a simpler prompt for local models which may have smaller context windows.
+        if self._using_local_model:
+            prompt = _LOCAL_COMPRESSION_PROMPT.format(conversation=content_to_summarize)
+        else:
+            prompt = f"""Create a concise handoff summary for a later assistant that will continue this conversation after earlier turns are compacted.
 
 Describe:
 1. What actions were taken (tool calls, searches, file operations)
@@ -151,6 +197,27 @@ Write only the summary body. Do not include any preamble or prefix; the system w
             summary = content.strip()
             return self._with_summary_prefix(summary)
         except RuntimeError:
+            # No cloud provider available — try local model endpoint as fallback.
+            if not self._using_local_model:
+                local_client, local_model = self._try_local_model()
+                if local_client is not None:
+                    local_prompt = _LOCAL_COMPRESSION_PROMPT.format(conversation=content_to_summarize)
+                    try:
+                        logger.info("Using local model as compression fallback (%s)", local_model)
+                        from openai import OpenAI as _OpenAI  # noqa: F401 — already imported in _try_local_model
+                        response = local_client.chat.completions.create(
+                            model=local_model,
+                            messages=[{"role": "user", "content": local_prompt}],
+                            temperature=0.3,
+                            max_tokens=self.summary_target_tokens * 2,
+                            timeout=30.0,
+                        )
+                        content = response.choices[0].message.content
+                        if not isinstance(content, str):
+                            content = str(content) if content else ""
+                        return self._with_summary_prefix(content.strip())
+                    except Exception as local_err:
+                        logging.warning("Local model compression also failed: %s", local_err)
             logging.warning("Context compression: no provider available for "
                             "summary. Middle turns will be dropped without summary.")
             return None

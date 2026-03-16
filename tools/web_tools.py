@@ -45,9 +45,20 @@ import logging
 import os
 import re
 import asyncio
+import sys
 from typing import List, Dict, Any, Optional
-import httpx
-from firecrawl import Firecrawl
+try:
+    import httpx
+    _httpx_available = True
+except ImportError:
+    httpx = None  # type: ignore[assignment]
+    _httpx_available = False
+try:
+    from firecrawl import Firecrawl
+    _firecrawl_available = True
+except ImportError:
+    Firecrawl = None  # type: ignore[assignment,misc]
+    _firecrawl_available = False
 from agent.auxiliary_client import async_call_llm
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
@@ -99,7 +110,11 @@ def _get_firecrawl_client():
     Set FIRECRAWL_API_URL to point at a self-hosted instance instead —
     in that case the API key is optional (set USE_DB_AUTHENTICATION=false
     on your Firecrawl server to disable auth entirely).
+
+    Returns None if the firecrawl package is not installed.
     """
+    if not _firecrawl_available:
+        return None
     global _firecrawl_client
     if _firecrawl_client is None:
         api_key = os.getenv("FIRECRAWL_API_KEY")
@@ -664,6 +679,193 @@ async def _parallel_extract(urls: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
+# ---------------------------------------------------------------------------
+# SearXNG search backend (no API key required)
+# ---------------------------------------------------------------------------
+
+def _searxng_search(query: str, num_results: int = 10, searxng_url: str = None) -> list:
+    """Search using a local SearXNG instance (no API key required).
+
+    Args:
+        query: Search query string.
+        num_results: Maximum number of results.
+        searxng_url: SearXNG instance URL. Defaults to SEARXNG_URL env var or http://localhost:8888.
+
+    Returns:
+        List of dicts with keys: title, url, content (snippet).
+    """
+    if not _httpx_available:
+        logger.debug("httpx not installed; SearXNG search unavailable")
+        return []
+
+    if searxng_url is None:
+        searxng_url = os.environ.get("SEARXNG_URL", "http://localhost:8888")
+
+    searxng_url = searxng_url.rstrip("/")
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(
+                f"{searxng_url}/search",
+                params={
+                    "q": query,
+                    "format": "json",
+                    "pageno": 1,
+                    "categories": "general",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = []
+            for item in data.get("results", [])[:num_results]:
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "content": item.get("content", ""),
+                })
+
+            return results
+    except Exception as e:
+        logger.warning("SearXNG search failed: %s", e)
+        return []
+
+
+def _is_searxng_available(searxng_url: str = None) -> bool:
+    """Check if a SearXNG instance is reachable."""
+    if not _httpx_available:
+        return False
+    if searxng_url is None:
+        searxng_url = os.environ.get("SEARXNG_URL", "http://localhost:8888")
+    try:
+        resp = httpx.get(f"{searxng_url.rstrip('/')}/healthz", timeout=3.0)
+        return resp.status_code == 200
+    except Exception:
+        # Try the search endpoint as fallback health check
+        try:
+            resp = httpx.get(
+                f"{searxng_url.rstrip('/')}/search",
+                params={"q": "test", "format": "json"},
+                timeout=3.0,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+
+def _format_searxng_results(results: list) -> str:
+    """Format SearXNG results as markdown, matching Firecrawl output style."""
+    if not results:
+        return "No results found."
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "Untitled")
+        url = r.get("url", "")
+        content = r.get("content", "")
+        lines.append(f"### {i}. {title}")
+        lines.append(f"**URL:** {url}")
+        if content:
+            lines.append(f"\n{content}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Local web extraction (no API key required)
+# ---------------------------------------------------------------------------
+
+
+async def _local_web_extract(url: str) -> Optional[str]:
+    """Extract main content from a web page using trafilatura (local, no API key).
+
+    Falls back to basic httpx + html parsing if trafilatura is not installed.
+
+    Args:
+        url: URL to extract content from.
+
+    Returns:
+        Extracted text content as markdown, or None if extraction failed.
+    """
+    try:
+        import trafilatura
+
+        # Download the page
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            logger.warning("trafilatura: Failed to download %s", url)
+            return None
+
+        # Extract main content
+        result = trafilatura.extract(
+            downloaded,
+            include_comments=False,
+            include_tables=True,
+            include_links=True,
+            output_format="txt",
+            favor_precision=True,
+        )
+
+        return result
+
+    except ImportError:
+        logger.debug("trafilatura not installed, trying basic extraction")
+        return await _basic_web_extract(url)
+    except Exception as e:
+        logger.warning("trafilatura extraction failed for %s: %s", url, e)
+        return await _basic_web_extract(url)
+
+
+async def _basic_web_extract(url: str) -> Optional[str]:
+    """Basic web content extraction using httpx + simple HTML stripping.
+
+    Minimal fallback when neither Firecrawl nor trafilatura is available.
+    """
+    if not _httpx_available:
+        logger.debug("httpx not installed; basic web extract unavailable for %s", url)
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; HermesBot/1.0)"
+            })
+            resp.raise_for_status()
+
+            html = resp.text
+
+            # Try readability-lxml if available
+            try:
+                from readability import Document
+                doc = Document(html)
+                title = doc.title()
+                content = doc.summary()
+                # Strip remaining HTML tags
+                content = re.sub(r'<[^>]+>', '', content)
+                content = re.sub(r'\s+', ' ', content).strip()
+                return f"# {title}\n\n{content}"
+            except ImportError:
+                pass
+
+            # Basic fallback: strip HTML tags
+            # Remove script and style elements
+            html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+            html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+            # Remove HTML tags
+            text = re.sub(r'<[^>]+>', ' ', html)
+            # Clean up whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+            # Truncate to reasonable length
+            if len(text) > 10000:
+                text = text[:10000] + "\n\n[Content truncated]"
+
+            return text
+
+    except Exception as e:
+        logger.warning("Basic web extraction failed for %s: %s", url, e)
+        return None
+
+
 def web_search_tool(query: str, limit: int = 5) -> str:
     """
     Search the web for information using available search API backend.
@@ -742,6 +944,32 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             return result_json
 
         logger.info("Searching the web for: '%s' (limit: %d)", query, limit)
+
+        # Try Firecrawl first (cloud or self-hosted); fall back to SearXNG.
+        if not _firecrawl_available or (not os.getenv("FIRECRAWL_API_KEY") and not os.getenv("FIRECRAWL_API_URL")):
+            logger.info("No Firecrawl credentials set; trying SearXNG fallback")
+            if _is_searxng_available():
+                searxng_results = _searxng_search(query, num_results=limit)
+                formatted = _format_searxng_results(searxng_results)
+                result_json = json.dumps(
+                    {"success": True, "backend": "searxng", "data": {"markdown": formatted}},
+                    ensure_ascii=False,
+                )
+                debug_call_data["results_count"] = len(searxng_results)
+                debug_call_data["final_response_size"] = len(result_json)
+                _debug.log_call("web_search_tool", debug_call_data)
+                _debug.save()
+                return result_json
+            else:
+                error_msg = (
+                    "No search backend available. "
+                    "Set FIRECRAWL_API_KEY (cloud) or FIRECRAWL_API_URL (self-hosted), "
+                    "or run a SearXNG instance and set SEARXNG_URL."
+                )
+                debug_call_data["error"] = error_msg
+                _debug.log_call("web_search_tool", debug_call_data)
+                _debug.save()
+                return json.dumps({"error": error_msg, "success": False}, ensure_ascii=False)
 
         response = _get_firecrawl_client().search(
             query=query,
@@ -858,6 +1086,10 @@ async def web_extract_tool(
     }
     
     try:
+        # Normalize: callers may pass a bare string instead of a list.
+        if isinstance(urls, str):
+            urls = [urls]
+
         logger.info("Extracting content from %d URL(s)", len(urls))
 
         # Dispatch to the configured backend
@@ -983,13 +1215,23 @@ async def web_extract_tool(
 
                 except Exception as scrape_err:
                     logger.debug("Scrape failed for %s: %s", url, scrape_err)
-                    results.append({
-                        "url": url,
-                        "title": "",
-                        "content": "",
-                        "raw_content": "",
-                        "error": str(scrape_err)
-                    })
+                    logger.info("Trying local web extraction (trafilatura) for %s", url)
+                    extracted_content = await _local_web_extract(url)
+                    if extracted_content:
+                        results.append({
+                            "url": url,
+                            "title": "",
+                            "content": extracted_content,
+                            "raw_content": extracted_content,
+                        })
+                    else:
+                        results.append({
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "raw_content": "",
+                            "error": str(scrape_err)
+                        })
 
         response = {"results": results}
         
@@ -1515,9 +1757,25 @@ def check_firecrawl_api_key() -> bool:
     Check if the Firecrawl API key is available in environment variables.
 
     Returns:
-        bool: True if API key is set, False otherwise
+        bool: True if firecrawl is installed and an API key (or API URL) is set,
+              False otherwise.
     """
-    return bool(os.getenv("FIRECRAWL_API_KEY"))
+    return _firecrawl_available and bool(os.getenv("FIRECRAWL_API_KEY"))
+
+
+def check_web_search_available() -> bool:
+    """Check if any web search backend is available.
+    Always returns True — availability is checked at runtime with graceful fallback.
+    """
+    return True
+
+
+def check_web_extract_available() -> bool:
+    """Check if any web extract backend is available.
+
+    Always returns True — trafilatura/basic extraction needs no API key.
+    """
+    return True
 
 
 def check_web_api_key() -> bool:
@@ -1689,8 +1947,8 @@ registry.register(
     schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown"),
-    check_fn=check_web_api_key,
-    requires_env=["PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
+    check_fn=check_web_extract_available,
+    requires_env=[],
     is_async=True,
     emoji="📄",
 )

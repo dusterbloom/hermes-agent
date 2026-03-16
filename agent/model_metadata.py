@@ -16,6 +16,7 @@ import requests
 import yaml
 
 from hermes_constants import OPENROUTER_MODELS_URL
+from agent.hardware import get_available_vram_mb
 
 logger = logging.getLogger(__name__)
 
@@ -494,3 +495,156 @@ def estimate_messages_tokens_rough(messages: List[Dict[str, Any]]) -> int:
     """Rough token estimate for a message list (pre-flight only)."""
     total_chars = sum(len(str(msg)) for msg in messages)
     return total_chars // 4
+
+
+def parse_gguf_metadata(file_path: str) -> Optional[dict]:
+    """Parse GGUF file to extract model architecture metadata.
+
+    Returns dict with keys: n_layers, n_kv_heads, n_heads, embedding_dim, context_length
+    Returns None if parsing fails.
+    """
+    try:
+        from gguf import GGUFReader
+        reader = GGUFReader(file_path)
+
+        metadata = {}
+        arch = None
+
+        # Extract architecture name
+        for field in reader.fields.values():
+            if field.name == "general.architecture":
+                arch = str(bytes(field.parts[-1]), encoding='utf-8')
+                break
+
+        if not arch:
+            arch = "llama"  # default fallback
+
+        # Key mappings to search for
+        key_mappings = {
+            f"{arch}.block_count": "n_layers",
+            f"{arch}.attention.head_count_kv": "n_kv_heads",
+            f"{arch}.attention.head_count": "n_heads",
+            f"{arch}.embedding_length": "embedding_dim",
+            f"{arch}.context_length": "context_length",
+        }
+
+        for field in reader.fields.values():
+            if field.name in key_mappings:
+                value = int(field.parts[-1][0])
+                metadata[key_mappings[field.name]] = value
+
+        return metadata if metadata else None
+
+    except ImportError:
+        logger.debug("gguf package not installed, GGUF parsing unavailable")
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to parse GGUF file {file_path}: {e}")
+        return None
+
+
+def compute_kv_cache_bytes_per_token(metadata: dict) -> int:
+    """Calculate KV cache memory cost per token from GGUF metadata.
+
+    Formula: 2 * n_layers * n_kv_heads * head_dim * 2 (bytes, FP16)
+    where head_dim = embedding_dim / n_heads
+    """
+    n_layers = metadata.get("n_layers", 0)
+    n_kv_heads = metadata.get("n_kv_heads", 0)
+    n_heads = metadata.get("n_heads", 0)
+    embedding_dim = metadata.get("embedding_dim", 0)
+
+    if not all([n_layers, n_kv_heads, n_heads, embedding_dim]):
+        return 0
+
+    head_dim = embedding_dim // n_heads
+    # 2 (K+V) * layers * kv_heads * head_dim * 2 (FP16 bytes)
+    return 2 * n_layers * n_kv_heads * head_dim * 2
+
+
+def practical_context_cap(file_size_bytes: int) -> int:
+    """Estimate a practical context length cap based on model file size.
+
+    Smaller models shouldn't get huge context windows even if VRAM allows it —
+    their quality degrades at long contexts.
+    """
+    gb = file_size_bytes / (1024 ** 3)
+    if gb < 2:
+        return 8192
+    elif gb < 4:
+        return 16384
+    elif gb < 8:
+        return 32768
+    elif gb < 16:
+        return 65536
+    else:
+        return 131072
+
+
+def compute_optimal_context_size(
+    gguf_path: Optional[str] = None,
+    available_vram_mb: Optional[int] = None,
+    model_context_length: Optional[int] = None,
+) -> int:
+    """Compute optimal context window size based on VRAM and model architecture.
+
+    Args:
+        gguf_path: Path to GGUF file for metadata extraction.
+        available_vram_mb: Available VRAM in MB. If None, auto-detect.
+        model_context_length: Server-reported or configured context length.
+
+    Returns:
+        Optimal context length in tokens.
+    """
+    if available_vram_mb is None:
+        available_vram_mb = get_available_vram_mb()
+
+    if available_vram_mb <= 0:
+        # No GPU detected, use conservative default
+        return model_context_length or 4096
+
+    # Try GGUF parsing for precise calculation
+    kv_per_token = 0
+    file_size = 0
+
+    if gguf_path:
+        if os.path.exists(gguf_path):
+            file_size = os.path.getsize(gguf_path)
+            metadata = parse_gguf_metadata(gguf_path)
+            if metadata:
+                kv_per_token = compute_kv_cache_bytes_per_token(metadata)
+                if model_context_length is None:
+                    model_context_length = metadata.get("context_length")
+
+    # Fallback: use model_context_length or default
+    if model_context_length is None:
+        model_context_length = 4096
+
+    if kv_per_token > 0:
+        # Precise calculation
+        overhead_mb = 512  # reserve for model weights overhead, OS, etc.
+        budget_bytes = (available_vram_mb - overhead_mb) * 1024 * 1024
+        if budget_bytes <= 0:
+            return min(model_context_length, 4096)
+
+        max_context = budget_bytes // kv_per_token
+
+        # Apply practical cap based on model size
+        if file_size > 0:
+            cap = practical_context_cap(file_size)
+            max_context = min(max_context, cap)
+
+        # Clamp to model's max and minimum
+        max_context = min(max_context, model_context_length)
+        max_context = max(max_context, 2048)  # minimum viable context
+
+        # Round down to nearest 1024
+        max_context = (max_context // 1024) * 1024
+
+        return max_context
+    else:
+        # No GGUF data — use file size heuristic or server-reported length
+        if file_size > 0:
+            cap = practical_context_cap(file_size)
+            return min(cap, model_context_length)
+        return model_context_length
