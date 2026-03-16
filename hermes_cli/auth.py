@@ -212,6 +212,12 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("KILOCODE_API_KEY",),
         base_url_env_var="KILOCODE_BASE_URL",
     ),
+    "local": ProviderConfig(
+        id="local",
+        name="Local (Ollama/LM Studio/vLLM/llama.cpp)",
+        auth_type="none",  # no authentication needed
+        inference_base_url="",  # auto-detected at runtime
+    ),
 }
 
 
@@ -703,6 +709,15 @@ def resolve_provider(
         for env_var in pconfig.api_key_env_vars:
             if os.getenv(env_var, "").strip():
                 return pid
+
+    # Auto-detect a running local inference server before falling back to cloud
+    try:
+        from agent.local_models import detect_best_server
+        server = detect_best_server(timeout=1.0)
+        if server:
+            return "local"
+    except Exception as e:
+        logger.debug("Local server auto-detection failed: %s", e)
 
     return "openrouter"
 
@@ -1630,11 +1645,63 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_codex_auth_status()
     if target == "copilot-acp":
         return get_external_process_provider_status(target)
+    if target == "local":
+        # Local providers don't need authentication
+        return {"logged_in": True, "provider": "local"}
     # API-key providers
     pconfig = PROVIDER_REGISTRY.get(target)
     if pconfig and pconfig.auth_type == "api_key":
         return get_api_key_provider_status(target)
     return {"logged_in": False}
+
+
+def resolve_local_runtime_credentials() -> Dict[str, Any]:
+    """Resolve runtime credentials for a local inference server.
+
+    Detects the best running local server (Ollama, LM Studio, vLLM, llama.cpp)
+    and returns its URL.  No API key is required.
+
+    Returns dict with: provider, base_url, api_key (empty), source.
+    Raises AuthError if no local server is reachable.
+    """
+    # Check if a URL was explicitly saved in auth store
+    auth_store = _load_auth_store()
+    state = _load_provider_state(auth_store, "local")
+    if state and state.get("server_url"):
+        return {
+            "provider": "local",
+            "base_url": state["server_url"].rstrip("/"),
+            "api_key": "",
+            "source": "auth-store",
+            "server_type": state.get("server_type", "local"),
+        }
+
+    # Fall back to live detection
+    try:
+        from agent.local_models import detect_best_server
+        server = detect_best_server(timeout=2.0)
+    except Exception as exc:
+        raise AuthError(
+            f"Failed to detect local inference server: {exc}",
+            provider="local",
+            code="local_detection_failed",
+        ) from exc
+
+    if not server:
+        raise AuthError(
+            "No local inference server detected. "
+            "Start Ollama, LM Studio, vLLM, or llama.cpp first.",
+            provider="local",
+            code="local_server_not_found",
+        )
+
+    return {
+        "provider": "local",
+        "base_url": server.url.rstrip("/"),
+        "api_key": "",
+        "source": "auto-detected",
+        "server_type": server.server_type,
+    }
 
 
 def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
@@ -2288,6 +2355,35 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
     except Exception as exc:
         print(f"Login failed: {exc}")
         raise SystemExit(1)
+
+
+def _login_local(args) -> None:
+    """Configure local inference provider (no API key required)."""
+    try:
+        from agent.local_models import detect_best_server
+        server = detect_best_server(timeout=2.0)
+    except Exception as exc:
+        print(f"Local server detection failed: {exc}")
+        raise SystemExit(1)
+
+    if not server:
+        print("No local inference server detected.")
+        print("Start Ollama, LM Studio, vLLM, or llama.cpp first, then retry.")
+        raise SystemExit(1)
+
+    with _auth_store_lock():
+        auth_store = _load_auth_store()
+        _save_provider_state(auth_store, "local", {
+            "server_type": server.server_type,
+            "server_url": server.url,
+        })
+        auth_store["active_provider"] = "local"
+        saved_to = _save_auth_store(auth_store)
+
+    config_path = _update_config_for_provider("local", server.url)
+    print(f"Configured local provider: {server.server_type} at {server.url}")
+    print(f"  Auth state: {saved_to}")
+    print(f"  Config updated: {config_path} (model.provider=local)")
 
 
 def logout_command(args) -> None:

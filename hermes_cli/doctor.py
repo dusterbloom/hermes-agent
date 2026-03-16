@@ -30,8 +30,12 @@ load_dotenv(PROJECT_ROOT / ".env", override=False, encoding="utf-8")
 os.environ.setdefault("MSWEA_GLOBAL_CONFIG_DIR", str(HERMES_HOME))
 os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
+import logging
+
 from hermes_cli.colors import Colors, color
 from hermes_constants import OPENROUTER_MODELS_URL
+
+logger = logging.getLogger(__name__)
 
 
 _PROVIDER_ENV_HINTS = (
@@ -126,6 +130,149 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
     else:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
+
+
+def run_local_checks(verbose: bool = False) -> list[dict]:
+    """Run health checks for local inference setup.
+
+    Returns list of check results, each with:
+        name: str - check name
+        status: "pass" | "warn" | "fail"
+        message: str - human-readable result
+    """
+    checks = []
+    checks.append(_check_local_server())
+    checks.append(_check_model_loaded())
+    checks.append(_check_hardware())
+    checks.append(_check_tool_calling())
+    checks.append(_check_searxng())
+    checks.append(_check_base_url_config())
+    return checks
+
+
+def _check_local_server() -> dict:
+    """Check if a local inference server is running."""
+    try:
+        from agent.local_models import detect_running_servers
+        servers = detect_running_servers(timeout=2.0)
+        if servers:
+            names = [f"{s.server_type} ({s.url})" for s in servers]
+            return {"name": "Local Server", "status": "pass", "message": f"Found: {', '.join(names)}"}
+        return {"name": "Local Server", "status": "fail",
+                "message": "No local server detected. Start Ollama, LM Studio, or vLLM."}
+    except Exception as e:
+        return {"name": "Local Server", "status": "fail", "message": f"Detection error: {e}"}
+
+
+def _check_model_loaded() -> dict:
+    """Check if a model is loaded on the local server."""
+    try:
+        from agent.local_models import detect_best_server, list_models
+        server = detect_best_server(timeout=2.0)
+        if not server:
+            return {"name": "Model Loaded", "status": "warn", "message": "No server to check"}
+
+        models = list_models(server.url, server.server_type)
+        if models:
+            names = [m.name for m in models[:3]]
+            more = f" (+{len(models) - 3} more)" if len(models) > 3 else ""
+            return {"name": "Model Loaded", "status": "pass",
+                    "message": f"Models: {', '.join(names)}{more}"}
+        return {"name": "Model Loaded", "status": "warn",
+                "message": f"No models loaded on {server.server_type}"}
+    except Exception as e:
+        return {"name": "Model Loaded", "status": "warn", "message": f"Check error: {e}"}
+
+
+def _check_hardware() -> dict:
+    """Check GPU and memory availability."""
+    try:
+        from agent.hardware import detect_hardware
+        hw = detect_hardware()
+        if hw.gpu:
+            return {"name": "Hardware", "status": "pass",
+                    "message": f"{hw.gpu.name} — {hw.gpu.vram_free_mb}MB VRAM free / {hw.gpu.vram_total_mb}MB total"}
+        return {"name": "Hardware", "status": "warn",
+                "message": f"No GPU detected. CPU: {hw.cpu_cores} cores, RAM: {hw.ram_total_mb}MB"}
+    except Exception as e:
+        return {"name": "Hardware", "status": "warn", "message": f"Detection error: {e}"}
+
+
+def _check_tool_calling() -> dict:
+    """Check if the configured model supports tool calling."""
+    model = os.environ.get("OPENAI_MODEL", "")
+    if not model:
+        return {"name": "Tool Calling", "status": "warn",
+                "message": "No model configured (OPENAI_MODEL not set)"}
+
+    try:
+        from agent.model_capabilities import lookup
+        caps = lookup(model)
+        if caps.tool_calling:
+            return {"name": "Tool Calling", "status": "pass",
+                    "message": f"{model}: native tool calling supported"}
+        return {"name": "Tool Calling", "status": "warn",
+                "message": f"{model}: no native tool calling — textual fallback will be used"}
+    except Exception as e:
+        return {"name": "Tool Calling", "status": "warn", "message": f"Check error: {e}"}
+
+
+def _check_searxng() -> dict:
+    """Check if SearXNG is available for local web search."""
+    searxng_url = os.environ.get("SEARXNG_URL", "http://localhost:8888")
+    try:
+        import httpx
+        try:
+            resp = httpx.get(f"{searxng_url}/healthz", timeout=2.0)
+            if resp.status_code == 200:
+                return {"name": "SearXNG", "status": "pass", "message": f"Available at {searxng_url}"}
+        except Exception:
+            pass
+        try:
+            resp = httpx.get(f"{searxng_url}/search", params={"q": "test", "format": "json"}, timeout=2.0)
+            if resp.status_code == 200:
+                return {"name": "SearXNG", "status": "pass", "message": f"Available at {searxng_url}"}
+        except Exception:
+            pass
+        return {"name": "SearXNG", "status": "warn",
+                "message": f"Not available at {searxng_url}. Run: docker run -d -p 8888:8080 searxng/searxng"}
+    except ImportError:
+        return {"name": "SearXNG", "status": "warn", "message": "httpx not installed"}
+
+
+def _check_base_url_config() -> dict:
+    """Check if OPENAI_BASE_URL is configured."""
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    if base_url:
+        return {"name": "Base URL", "status": "pass", "message": f"OPENAI_BASE_URL={base_url}"}
+    return {"name": "Base URL", "status": "warn",
+            "message": "OPENAI_BASE_URL not set. Set it to your local server's OpenAI-compatible endpoint."}
+
+
+def format_doctor_results(checks: list[dict]) -> str:
+    """Format doctor check results for terminal display."""
+    lines = ["\nHermes Local Health Check\n"]
+
+    status_icons = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+    for check in checks:
+        icon = status_icons.get(check["status"], "?")
+        lines.append(f"  {icon} {check['name']}: {check['message']}")
+
+    passed = sum(1 for c in checks if c["status"] == "pass")
+    warned = sum(1 for c in checks if c["status"] == "warn")
+    failed = sum(1 for c in checks if c["status"] == "fail")
+
+    lines.append(f"\n  Summary: {passed} passed, {warned} warnings, {failed} failed")
+
+    if failed > 0:
+        lines.append("  Fix the failures above before using hermes in local mode.")
+    elif warned > 0:
+        lines.append("  Warnings are optional but recommended for best experience.")
+    else:
+        lines.append("  All checks passed! Ready for local inference.")
+
+    return "\n".join(lines)
 
 
 def run_doctor(args):
@@ -743,6 +890,25 @@ def run_doctor(args):
         check_warn("honcho-ai not installed", "pip install honcho-ai")
     except Exception as _e:
         check_warn("Honcho check failed", str(_e))
+
+    # =========================================================================
+    # Check: Local Inference (only in local mode)
+    # =========================================================================
+    try:
+        from hermes_cli.config import is_local_mode, load_config
+        config = load_config()
+        if is_local_mode(config):
+            print()
+            print(color("◆ Local Inference", Colors.CYAN, Colors.BOLD))
+            local_checks = run_local_checks()
+            _status_fns = {"pass": check_ok, "warn": check_warn, "fail": check_fail}
+            for lc in local_checks:
+                fn = _status_fns.get(lc["status"], check_warn)
+                fn(lc["name"], f"({lc['message']})")
+                if lc["status"] == "fail":
+                    issues.append(lc["message"])
+    except Exception as e:
+        check_warn("Local inference checks", f"(could not run: {e})")
 
     # =========================================================================
     # Summary

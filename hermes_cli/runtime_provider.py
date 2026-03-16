@@ -15,6 +15,7 @@ from hermes_cli.auth import (
     resolve_codex_runtime_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
+    resolve_local_runtime_credentials,
 )
 from hermes_cli.config import load_config
 from hermes_constants import OPENROUTER_BASE_URL
@@ -282,6 +283,18 @@ def resolve_runtime_provider(
             "api_key": creds.get("api_key", ""),
             "source": creds.get("source", "hermes-auth-store"),
             "last_refresh": creds.get("last_refresh"),
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "local":
+        creds = resolve_local_runtime_credentials()
+        return {
+            "provider": "local",
+            "api_mode": "chat_completions",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": "",
+            "source": creds.get("source", "auto-detected"),
+            "server_type": creds.get("server_type", "local"),
             "requested_provider": requested_provider,
         }
 

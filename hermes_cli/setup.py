@@ -790,6 +790,263 @@ def _prompt_container_resources(config: dict):
 
 
 # =============================================================================
+# Local-only setup helpers
+# =============================================================================
+
+def _append_env_var(env_path: str, key: str, value: str):
+    """Append or update an env var in the .env file."""
+    lines = []
+    found = False
+
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = f"{key}={value}\n"
+            found = True
+            break
+
+    if not found:
+        lines.append(f"{key}={value}\n")
+
+    os.makedirs(os.path.dirname(env_path), exist_ok=True)
+    with open(env_path, "w") as f:
+        f.writelines(lines)
+
+
+def _setup_local(config: dict) -> dict:
+    """Configure hermes for local-only operation."""
+    from agent.local_models import detect_running_servers, list_models, get_openai_base_url
+    from agent.hardware import detect_hardware, format_hardware_summary
+
+    print_header("Local-only Setup")
+    print_info("Detecting hardware...")
+    hw = detect_hardware()
+    print(format_hardware_summary(hw))
+
+    print_info("Detecting local servers...")
+    servers = detect_running_servers()
+
+    if not servers:
+        print()
+        print_warning("No local inference server detected!")
+        print_info("Please start one of:")
+        print_info("  Ollama:    ollama serve")
+        print_info("  LM Studio: Start the application")
+        print_info("  vLLM:      docker run --gpus all vllm/vllm-openai --model <name>")
+        print_info("  llama.cpp: ./llama-server -m <model.gguf>")
+        print()
+        print_info("Then run 'hermes setup' again.")
+        return config
+
+    # Show detected servers
+    print()
+    print_success(f"Found {len(servers)} running server(s):")
+    for i, s in enumerate(servers):
+        models_str = ", ".join(s.models_loaded[:3]) if s.models_loaded else "none loaded"
+        if len(s.models_loaded) > 3:
+            models_str += f" (+{len(s.models_loaded) - 3} more)"
+        print_info(f"  {i + 1}. {s.server_type} at {s.url} — models: {models_str}")
+
+    # Select server
+    if len(servers) == 1:
+        selected = servers[0]
+        print_info(f"Using {selected.server_type} at {selected.url}")
+    else:
+        server_choices = [f"{s.server_type} at {s.url}" for s in servers]
+        server_idx = prompt_choice("Select server:", server_choices, 0)
+        selected = servers[server_idx]
+
+    # List and select model
+    models = list_models(selected.url, selected.server_type)
+    if models:
+        print()
+        print_info("Available models:")
+        for i, m in enumerate(models):
+            size_str = f" ({m.size_bytes // (1024 ** 3)}GB)" if m.size_bytes else ""
+            print_info(f"  {i + 1}. {m.name}{size_str}")
+
+        model_choices = [m.name for m in models]
+        model_idx = prompt_choice("Select model:", model_choices, 0)
+        selected_model = models[model_idx]
+        model_name = selected_model.name
+    else:
+        model_name = prompt("No models found. Enter model name")
+        if not model_name:
+            print_warning("No model specified. Please load a model on your server.")
+            return config
+
+    # Configure
+    base_url = get_openai_base_url(selected.url, selected.server_type)
+
+    config["model"] = model_name
+    config.setdefault("local", {}).update({
+        "enabled": True,
+        "server_type": selected.server_type,
+        "server_url": selected.url,
+        "models_dir": "~/models",
+        "auto_context_sizing": True,
+        "protocol_mode": "auto",
+        "tool_call_mode": "auto",
+    })
+
+    # Write env vars
+    env_path = os.path.expanduser("~/.hermes/.env")
+    _append_env_var(env_path, "OPENAI_BASE_URL", base_url)
+    _append_env_var(env_path, "OPENAI_API_KEY", "local")
+    _append_env_var(env_path, "OPENAI_MODEL", model_name)
+
+    # Also save to config.yaml via save_env_value so the resolver picks it up
+    save_env_value("OPENAI_BASE_URL", base_url)
+    save_env_value("OPENAI_API_KEY", "local")
+    save_env_value("LLM_MODEL", model_name)
+
+    print()
+    print_success(f"Configured for local mode:")
+    print_info(f"  Server: {selected.server_type} at {selected.url}")
+    print_info(f"  Model:  {model_name}")
+    print_info(f"  Base URL: {base_url}")
+
+    # Suggest SearXNG for web search
+    print()
+    print_info("For web search without API keys, run SearXNG:")
+    print_info("  docker run -d -p 8888:8080 searxng/searxng")
+
+    return config
+
+
+# =============================================================================
+# Local-only setup helpers
+# =============================================================================
+
+
+def _append_env_var(env_path: str, key: str, value: str):
+    """Append or update an env var in the .env file."""
+    lines = []
+    found = False
+
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = f"{key}={value}\n"
+            found = True
+            break
+
+    if not found:
+        lines.append(f"{key}={value}\n")
+
+    os.makedirs(os.path.dirname(env_path), exist_ok=True)
+    with open(env_path, "w") as f:
+        f.writelines(lines)
+
+
+def _setup_local(config: dict) -> dict:
+    """Configure hermes for local-only operation."""
+    from agent.local_models import detect_running_servers, list_models, get_openai_base_url
+    from agent.hardware import detect_hardware, format_hardware_summary
+
+    print_header("Local-only Setup")
+    print_info("Detecting hardware...")
+    hw = detect_hardware()
+    print(format_hardware_summary(hw))
+
+    print_info("Detecting local servers...")
+    servers = detect_running_servers()
+
+    if not servers:
+        print()
+        print_warning("No local inference server detected!")
+        print_info("Please start one of:")
+        print_info("  Ollama:    ollama serve")
+        print_info("  LM Studio: Start the application")
+        print_info("  vLLM:      docker run --gpus all vllm/vllm-openai --model <name>")
+        print_info("  llama.cpp: ./llama-server -m <model.gguf>")
+        print()
+        print_info("Then run 'hermes setup' again.")
+        return config
+
+    # Show detected servers
+    print()
+    print_success(f"Found {len(servers)} running server(s):")
+    for i, s in enumerate(servers):
+        models_str = ", ".join(s.models_loaded[:3]) if s.models_loaded else "none loaded"
+        if len(s.models_loaded) > 3:
+            models_str += f" (+{len(s.models_loaded) - 3} more)"
+        print_info(f"  {i + 1}. {s.server_type} at {s.url} — models: {models_str}")
+
+    # Select server
+    if len(servers) == 1:
+        selected = servers[0]
+        print_info(f"Using {selected.server_type} at {selected.url}")
+    else:
+        server_choices = [f"{s.server_type} at {s.url}" for s in servers]
+        server_idx = prompt_choice("Select server:", server_choices, 0)
+        selected = servers[server_idx]
+
+    # List and select model
+    models = list_models(selected.url, selected.server_type)
+    if models:
+        print()
+        print_info("Available models:")
+        for i, m in enumerate(models):
+            size_str = f" ({m.size_bytes // (1024 ** 3)}GB)" if m.size_bytes else ""
+            print_info(f"  {i + 1}. {m.name}{size_str}")
+
+        model_choices = [m.name for m in models]
+        model_idx = prompt_choice("Select model:", model_choices, 0)
+        selected_model = models[model_idx]
+        model_name = selected_model.name
+    else:
+        model_name = prompt("No models found. Enter model name")
+        if not model_name:
+            print_warning("No model specified. Please load a model on your server.")
+            return config
+
+    # Configure
+    base_url = get_openai_base_url(selected.url, selected.server_type)
+
+    config["model"] = model_name
+    config.setdefault("local", {}).update({
+        "enabled": True,
+        "server_type": selected.server_type,
+        "server_url": selected.url,
+        "models_dir": "~/models",
+        "auto_context_sizing": True,
+        "protocol_mode": "auto",
+        "tool_call_mode": "auto",
+    })
+
+    # Write env vars
+    env_path = os.path.expanduser("~/.hermes/.env")
+    _append_env_var(env_path, "OPENAI_BASE_URL", base_url)
+    _append_env_var(env_path, "OPENAI_API_KEY", "local")
+    _append_env_var(env_path, "OPENAI_MODEL", model_name)
+
+    # Also save to config.yaml via save_env_value so the resolver picks it up
+    save_env_value("OPENAI_BASE_URL", base_url)
+    save_env_value("OPENAI_API_KEY", "local")
+    save_env_value("LLM_MODEL", model_name)
+
+    print()
+    print_success(f"Configured for local mode:")
+    print_info(f"  Server: {selected.server_type} at {selected.url}")
+    print_info(f"  Model:  {model_name}")
+    print_info(f"  Base URL: {base_url}")
+
+    # Suggest SearXNG for web search
+    print()
+    print_info("For web search without API keys, run SearXNG:")
+    print_info("  docker run -d -p 8888:8080 searxng/searxng")
+
+    return config
+
+
+# =============================================================================
 # Section 1: Model & Provider Configuration
 # =============================================================================
 
@@ -873,6 +1130,8 @@ def setup_model_provider(config: dict):
         keep_label = None  # No provider configured — don't show "Keep current"
 
     provider_choices = [
+        "Local-only (no API keys needed — Ollama, LM Studio, vLLM, llama.cpp)",
+        "Nous Portal API key (direct API key access)",
         "Login with Nous Portal (Nous Research subscription — OAuth)",
         "Login with OpenAI Codex",
         "OpenRouter API key (100+ models, pay-per-use)",
@@ -894,7 +1153,9 @@ def setup_model_provider(config: dict):
         provider_choices.append(keep_label)
 
     # Default to "Keep current" if a provider exists, otherwise OpenRouter (most common)
-    default_provider = len(provider_choices) - 1 if has_any_provider else 2
+    # OpenRouter is now at index 4 (shifted by 2 due to Local-only at 0 and Nous API key at 1)
+    default_provider = len(provider_choices) - 1 if has_any_provider else 4
+
 
     if not has_any_provider:
         print_warning("An inference provider is required for Hermes to work.")
@@ -911,7 +1172,43 @@ def setup_model_provider(config: dict):
     selected_base_url = None  # deferred until after model selection
     nous_models = []  # populated if Nous login succeeds
 
-    if provider_idx == 0:  # Nous Portal (OAuth)
+    if provider_idx == 0:  # Local-only
+        selected_provider = "local"
+        config = _setup_local(config)
+        save_config(config)
+        return
+
+    elif provider_idx == 1:  # Nous Portal API Key (direct)
+        selected_provider = "nous-api"
+        print()
+        print_header("Nous Portal API Key")
+        print_info("Use a Nous Portal API key for direct access to Nous inference.")
+        print_info("Get your API key at: https://portal.nousresearch.com")
+        print()
+
+        existing_key = get_env_value("NOUS_API_KEY")
+        if existing_key:
+            print_info(f"Current: {existing_key[:8]}... (configured)")
+            if prompt_yes_no("Update Nous API key?", False):
+                api_key = prompt("  Nous API key", password=True)
+                if api_key:
+                    save_env_value("NOUS_API_KEY", api_key)
+                    print_success("Nous API key updated")
+        else:
+            api_key = prompt("  Nous API key", password=True)
+            if api_key:
+                save_env_value("NOUS_API_KEY", api_key)
+                print_success("Nous API key saved")
+            else:
+                print_warning("Skipped - agent won't work without an API key")
+
+        # Clear custom endpoint vars if switching
+        if existing_custom:
+            save_env_value("OPENAI_BASE_URL", "")
+            save_env_value("OPENAI_API_KEY", "")
+        _update_config_for_provider("nous-api", "https://inference-api.nousresearch.com/v1")
+
+    elif provider_idx == 2:  # Nous Portal (OAuth)
         selected_provider = "nous"
         print()
         print_header("Nous Portal Login")
@@ -959,7 +1256,7 @@ def setup_model_provider(config: dict):
             print_info("You can try again later with: hermes model")
             selected_provider = None
 
-    elif provider_idx == 1:  # OpenAI Codex
+    elif provider_idx == 3:  # OpenAI Codex
         selected_provider = "openai-codex"
         print()
         print_header("OpenAI Codex Login")
@@ -985,7 +1282,7 @@ def setup_model_provider(config: dict):
             print_info("You can try again later with: hermes model")
             selected_provider = None
 
-    elif provider_idx == 2:  # OpenRouter
+    elif provider_idx == 4:  # OpenRouter
         selected_provider = "openrouter"
         print()
         print_header("OpenRouter API Key")
@@ -1040,7 +1337,7 @@ def setup_model_provider(config: dict):
         except Exception as e:
             logger.debug("Could not save provider to config.yaml: %s", e)
 
-    elif provider_idx == 3:  # Custom endpoint
+    elif provider_idx == 5:  # Custom endpoint
         selected_provider = "custom"
         print()
         print_header("Custom OpenAI-Compatible Endpoint")
@@ -1133,7 +1430,7 @@ def setup_model_provider(config: dict):
 
         print_success("Custom endpoint configured")
 
-    elif provider_idx == 4:  # Z.AI / GLM
+    elif provider_idx == 6:  # Z.AI / GLM
         selected_provider = "zai"
         print()
         print_header("Z.AI / GLM API Key")
@@ -1194,7 +1491,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "zai", zai_base_url)
         selected_base_url = zai_base_url
 
-    elif provider_idx == 5:  # Kimi / Moonshot
+    elif provider_idx == 7:  # Kimi / Moonshot
         selected_provider = "kimi-coding"
         print()
         print_header("Kimi / Moonshot API Key")
@@ -1227,7 +1524,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "kimi-coding", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 6:  # MiniMax
+    elif provider_idx == 8:  # MiniMax
         selected_provider = "minimax"
         print()
         print_header("MiniMax API Key")
@@ -1260,7 +1557,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "minimax", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 7:  # MiniMax China
+    elif provider_idx == 9:  # MiniMax China
         selected_provider = "minimax-cn"
         print()
         print_header("MiniMax China API Key")
@@ -1293,7 +1590,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "minimax-cn", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 8:  # Kilo Code
+    elif provider_idx == 10:  # Kilo Code
         selected_provider = "kilocode"
         print()
         print_header("Kilo Code API Key")
@@ -1326,7 +1623,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "kilocode", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 9:  # Anthropic
+    elif provider_idx == 11:  # Anthropic
         selected_provider = "anthropic"
         print()
         print_header("Anthropic Authentication")
@@ -1430,7 +1727,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "anthropic")
         selected_base_url = ""
 
-    elif provider_idx == 10:  # AI Gateway
+    elif provider_idx == 12:  # AI Gateway
         selected_provider = "ai-gateway"
         print()
         print_header("AI Gateway API Key")
@@ -1462,7 +1759,7 @@ def setup_model_provider(config: dict):
         _update_config_for_provider("ai-gateway", pconfig.inference_base_url, default_model="anthropic/claude-opus-4.6")
         _set_model_provider(config, "ai-gateway", pconfig.inference_base_url)
 
-    elif provider_idx == 11:  # Alibaba Cloud / DashScope
+    elif provider_idx == 13:  # Alibaba Cloud / DashScope
         selected_provider = "alibaba"
         print()
         print_header("Alibaba Cloud / DashScope API Key")
@@ -1494,7 +1791,7 @@ def setup_model_provider(config: dict):
         _update_config_for_provider("alibaba", pconfig.inference_base_url, default_model="qwen3.5-plus")
         _set_model_provider(config, "alibaba", pconfig.inference_base_url)
 
-    elif provider_idx == 12:  # OpenCode Zen
+    elif provider_idx == 14:  # OpenCode Zen
         selected_provider = "opencode-zen"
         print()
         print_header("OpenCode Zen API Key")
@@ -1527,7 +1824,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "opencode-zen", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 13:  # OpenCode Go
+    elif provider_idx == 15:  # OpenCode Go
         selected_provider = "opencode-go"
         print()
         print_header("OpenCode Go API Key")
@@ -1560,7 +1857,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "opencode-go", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 14:  # GitHub Copilot
+    elif provider_idx == 16:  # GitHub Copilot
         selected_provider = "copilot"
         print()
         print_header("GitHub Copilot")
@@ -1593,7 +1890,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "copilot", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 15:  # GitHub Copilot ACP
+    elif provider_idx == 17:  # GitHub Copilot ACP
         selected_provider = "copilot-acp"
         print()
         print_header("GitHub Copilot ACP")
@@ -1609,7 +1906,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "copilot-acp", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    # else: provider_idx == 16 (Keep current) — only shown when a provider already exists
+    # else: provider_idx == 18 (Keep current) — only shown when a provider already exists
     # Normalize "keep current" to an explicit provider so downstream logic
     # doesn't fall back to the generic OpenRouter/static-model path.
     if selected_provider is None:
@@ -1621,6 +1918,21 @@ def setup_model_provider(config: dict):
             selected_provider = "custom"
         elif existing_or:
             selected_provider = "openrouter"
+
+    # ── OpenRouter API Key for tools (if not already set) ──
+    # Tools (vision, web, MoA) use OpenRouter independently of the main provider.
+    # Prompt for OpenRouter key if not set and a non-OpenRouter provider was chosen.
+    if selected_provider in ("nous", "nous-api", "openai-codex", "custom", "zai", "kimi-coding", "minimax", "minimax-cn", "local") and not get_env_value("OPENROUTER_API_KEY"):
+        print()
+        print_header("OpenRouter API Key for Tools (optional)")
+        print_info("Web search, vision, and MoA tools use OpenRouter independently.")
+        print_info("Get a free key at: https://openrouter.ai/keys")
+        or_key = prompt("  OpenRouter API key (Enter to skip)", password=True).strip()
+        if or_key:
+            save_env_value("OPENROUTER_API_KEY", or_key)
+            print_success("OpenRouter key saved — tools will be available")
+        else:
+            print_info("Skipped — add later by running 'hermes setup'")
 
     # ── Vision & Image Analysis Setup ──
     # Keep setup aligned with the actual runtime resolver the vision tools use.

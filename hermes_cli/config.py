@@ -371,6 +371,20 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # Local-first / self-hosted LLM configuration
+    "local": {
+        "enabled": False,              # true = local-first mode
+        "server_type": "auto",         # auto | ollama | lm-studio | vllm | llama-cpp
+        "server_url": "",              # empty = auto-detect; e.g. "http://localhost:11434"
+        "models_dir": "~/models",
+        "auto_context_sizing": True,
+        "protocol_mode": "auto",       # auto | strict | relaxed
+        "tool_call_mode": "auto",      # auto | native | textual
+    },
+
+    # User overrides per model pattern, e.g. {"qwen2.5-coder": {"tool_calling": True, "vision": False}}
+    "model_capabilities": {},
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 10,
 }
@@ -861,6 +875,40 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "setting",
     },
+
+    # ── Local / self-hosted ──
+    "SEARXNG_URL": {
+        "description": "SearXNG search engine URL (default: http://localhost:8888)",
+        "prompt": "SearXNG URL",
+        "url": None,
+        "password": False,
+        "category": "setting",
+        "advanced": True,
+    },
+    "LOCAL_SERVER_TYPE": {
+        "description": "Local server type: auto, ollama, lm-studio, vllm, llama-cpp",
+        "prompt": "Local server type",
+        "url": None,
+        "password": False,
+        "category": "setting",
+        "advanced": True,
+    },
+    "LOCAL_SERVER_URL": {
+        "description": "Local server URL override",
+        "prompt": "Local server URL",
+        "url": None,
+        "password": False,
+        "category": "setting",
+        "advanced": True,
+    },
+    "LOCAL_MODELS_DIR": {
+        "description": "Directory for local GGUF model files",
+        "prompt": "Local models directory",
+        "url": None,
+        "password": False,
+        "category": "setting",
+        "advanced": True,
+    },
 }
 
 
@@ -1003,6 +1051,23 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
             if not quiet:
                 tz_display = config["timezone"] or "(server-local)"
                 print(f"  ✓ Added timezone to config.yaml: {tz_display}")
+
+    # ── Version 6 → 7: add local and model_capabilities sections ──
+    if current_ver < 7:
+        config = load_config()
+        changed = False
+        if "local" not in config:
+            config["local"] = DEFAULT_CONFIG["local"].copy()
+            results["config_added"].append("local")
+            changed = True
+        if "model_capabilities" not in config:
+            config["model_capabilities"] = {}
+            results["config_added"].append("model_capabilities")
+            changed = True
+        if changed:
+            save_config(config)
+            if not quiet:
+                print("  ✓ Added local-first configuration sections (local, model_capabilities)")
 
     # ── Version 8 → 9: clear ANTHROPIC_TOKEN from .env ──
     # The new Anthropic auth flow no longer uses this env var.
@@ -1520,10 +1585,51 @@ def get_env_value(key: str) -> Optional[str]:
     # Check environment first
     if key in os.environ:
         return os.environ[key]
-    
+
     # Then check .env file
     env_vars = load_env()
     return env_vars.get(key)
+
+
+# =============================================================================
+# Local-first helpers
+# =============================================================================
+
+def is_local_mode(config: dict) -> bool:
+    """Check if hermes is configured for local-first operation."""
+    if config.get("local", {}).get("enabled"):
+        return True
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    if not base_url:
+        return False
+    # Check for loopback
+    if any(h in base_url for h in ("localhost", "127.0.0.1", "0.0.0.0")):
+        return True
+    # Check for private/LAN IPs
+    import re
+    match = re.search(r'://([^:/]+)', base_url.lower())
+    if match:
+        host = match.group(1)
+        parts = host.split('.')
+        if len(parts) == 4:
+            try:
+                octets = [int(p) for p in parts]
+                if octets[0] == 10:
+                    return True
+                if octets[0] == 172 and 16 <= octets[1] <= 31:
+                    return True
+                if octets[0] == 192 and octets[1] == 168:
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
+def get_local_config(config: dict) -> dict:
+    """Get local configuration with defaults filled in."""
+    defaults = DEFAULT_CONFIG["local"]
+    local = config.get("local", {})
+    return {**defaults, **local}
 
 
 # =============================================================================
