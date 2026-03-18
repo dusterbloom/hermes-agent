@@ -17,6 +17,7 @@ import yaml
 
 from hermes_constants import OPENROUTER_MODELS_URL
 from agent.hardware import get_available_vram_mb
+from agent.local_protocol import detect_local_server_type, is_local_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -440,15 +441,79 @@ def parse_context_limit_from_error(error_msg: str) -> Optional[int]:
     return None
 
 
+def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
+    """Query a local server for the model's context length."""
+    import httpx
+
+    # Strip /v1 suffix to get the server root
+    server_url = base_url.rstrip("/")
+    if server_url.endswith("/v1"):
+        server_url = server_url[:-3]
+
+    try:
+        server_type = detect_local_server_type(base_url)
+    except Exception:
+        server_type = None
+
+    try:
+        with httpx.Client(timeout=3.0) as client:
+            # Ollama: /api/show returns model details with context info
+            if server_type == "ollama":
+                resp = client.post(f"{server_url}/api/show", json={"name": model})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Check model_info for context length
+                    model_info = data.get("model_info", {})
+                    for key, value in model_info.items():
+                        if "context_length" in key and isinstance(value, (int, float)):
+                            return int(value)
+                    # Check parameters string for num_ctx
+                    params = data.get("parameters", "")
+                    if "num_ctx" in params:
+                        for line in params.split("\n"):
+                            if "num_ctx" in line:
+                                parts = line.strip().split()
+                                if len(parts) >= 2:
+                                    try:
+                                        return int(parts[-1])
+                                    except ValueError:
+                                        pass
+
+            # LM Studio / vLLM / llama.cpp: try /v1/models/{model}
+            resp = client.get(f"{server_url}/v1/models/{model}")
+            if resp.status_code == 200:
+                data = resp.json()
+                # vLLM returns max_model_len
+                ctx = data.get("max_model_len") or data.get("context_length") or data.get("max_tokens")
+                if ctx and isinstance(ctx, (int, float)):
+                    return int(ctx)
+
+            # Try /v1/models and find the model in the list
+            resp = client.get(f"{server_url}/v1/models")
+            if resp.status_code == 200:
+                data = resp.json()
+                models_list = data.get("data", [])
+                for m in models_list:
+                    if m.get("id") == model:
+                        ctx = m.get("max_model_len") or m.get("context_length") or m.get("max_tokens")
+                        if ctx and isinstance(ctx, (int, float)):
+                            return int(ctx)
+    except Exception:
+        pass
+
+    return None
+
+
 def get_model_context_length(model: str, base_url: str = "", api_key: str = "") -> int:
     """Get the context length for a model.
 
     Resolution order:
     1. Persistent cache (previously discovered via probing)
     2. Active endpoint metadata (/models for explicit custom endpoints)
-    3. OpenRouter API metadata
-    4. Hardcoded DEFAULT_CONTEXT_LENGTHS (fuzzy match for hosted routes only)
-    5. First probe tier (2M) — will be narrowed on first context error
+    3. Local server query (for local endpoints when model not in /models list)
+    4. OpenRouter API metadata
+    5. Hardcoded DEFAULT_CONTEXT_LENGTHS (fuzzy match for hosted routes only)
+    6. First probe tier (2M) — will be narrowed on first context error
     """
     # 1. Check persistent cache (model+provider)
     if base_url:
@@ -466,6 +531,12 @@ def get_model_context_length(model: str, base_url: str = "", api_key: str = "") 
         if not _is_known_provider_base_url(base_url):
             # Explicit third-party endpoints should not borrow fuzzy global
             # defaults from unrelated providers with similarly named models.
+            # But first try querying the local server directly.
+            if is_local_endpoint(base_url):
+                local_ctx = _query_local_context_length(model, base_url)
+                if local_ctx and local_ctx > 0:
+                    save_context_length(model, base_url, local_ctx)
+                    return local_ctx
             return CONTEXT_PROBE_TIERS[0]
 
     # 3. OpenRouter API metadata
@@ -480,7 +551,14 @@ def get_model_context_length(model: str, base_url: str = "", api_key: str = "") 
         if default_model in model or model in default_model:
             return length
 
-    # 5. Unknown model — start at highest probe tier
+    # 5. Query local server for unknown models before defaulting to 2M
+    if base_url and is_local_endpoint(base_url):
+        local_ctx = _query_local_context_length(model, base_url)
+        if local_ctx and local_ctx > 0:
+            save_context_length(model, base_url, local_ctx)
+            return local_ctx
+
+    # 6. Unknown model — start at highest probe tier
     return CONTEXT_PROBE_TIERS[0]
 
 
