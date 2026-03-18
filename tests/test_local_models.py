@@ -193,6 +193,7 @@ class TestProbeServer:
         }
 
         mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
         mock_client.get.side_effect = [root_resp, tags_resp]
 
         with patch("agent.local_models.httpx.Client", return_value=mock_client):
@@ -221,6 +222,7 @@ class TestProbeServer:
         }
 
         mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
         mock_client.get.return_value = models_resp
 
         with patch("agent.local_models.httpx.Client", return_value=mock_client):
@@ -367,6 +369,7 @@ class TestListModels:
         }
 
         mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
         mock_client.get.return_value = resp
 
         with patch("agent.local_models.httpx.Client", return_value=mock_client):
@@ -389,6 +392,7 @@ class TestListModels:
         }
 
         mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
         mock_client.get.return_value = resp
 
         with patch("agent.local_models.httpx.Client", return_value=mock_client):
@@ -406,6 +410,7 @@ class TestListModels:
         }
 
         mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
         mock_client.get.return_value = resp
 
         with patch("agent.local_models.httpx.Client", return_value=mock_client):
@@ -444,6 +449,7 @@ class TestListModels:
         }
 
         mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
         mock_client.get.return_value = resp
 
         with patch("agent.local_models.httpx.Client", return_value=mock_client):

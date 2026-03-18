@@ -80,6 +80,20 @@ class ContextCompressor:
 
         # Track whether we're using a local model so we can pick the right prompt.
         self._using_local_model: bool = False
+        # Check if compression is configured for local
+        _compression_provider = os.environ.get("CONTEXT_COMPRESSION_PROVIDER", "").lower()
+        if _compression_provider == "local":
+            self._using_local_model = True
+        elif not _compression_provider or _compression_provider == "auto":
+            # Auto-detect: check if base URL is local
+            _base = os.environ.get("OPENAI_BASE_URL", "")
+            if _base:
+                try:
+                    from agent.local_protocol import is_local_endpoint
+                    if is_local_endpoint(_base):
+                        self._using_local_model = True
+                except ImportError:
+                    pass
 
         self.summary_model = summary_model_override or ""
 

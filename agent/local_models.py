@@ -85,41 +85,37 @@ def detect_best_server(timeout: float = 2.0) -> Optional[ServerStatus]:
 def _probe_server(url: str, server_type: str, timeout: float) -> Optional[ServerStatus]:
     """Probe a single server URL to check if it's running."""
     try:
-        client = httpx.Client(timeout=timeout)
+        with httpx.Client(timeout=timeout) as client:
+            if server_type == "ollama":
+                # Ollama has a simple root endpoint
+                resp = client.get(f"{url}")
+                if resp.status_code == 200:
+                    # Get loaded models
+                    models_resp = client.get(f"{url}/api/tags")
+                    loaded = []
+                    if models_resp.status_code == 200:
+                        data = models_resp.json()
+                        loaded = [m["name"] for m in data.get("models", [])]
+                    return ServerStatus(
+                        server_type="ollama",
+                        url=url,
+                        running=True,
+                        models_loaded=loaded,
+                    )
 
-        if server_type == "ollama":
-            # Ollama has a simple root endpoint
-            resp = client.get(f"{url}")
-            if resp.status_code == 200:
-                # Get loaded models
-                models_resp = client.get(f"{url}/api/tags")
-                loaded = []
-                if models_resp.status_code == 200:
-                    data = models_resp.json()
-                    loaded = [m["name"] for m in data.get("models", [])]
-                client.close()
-                return ServerStatus(
-                    server_type="ollama",
-                    url=url,
-                    running=True,
-                    models_loaded=loaded,
-                )
+            elif server_type in ("lm-studio", "vllm", "llama-cpp"):
+                # All use OpenAI-compatible /v1/models
+                resp = client.get(f"{url}/v1/models")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    loaded = [m["id"] for m in data.get("data", [])]
+                    return ServerStatus(
+                        server_type=server_type,
+                        url=url,
+                        running=True,
+                        models_loaded=loaded,
+                    )
 
-        elif server_type in ("lm-studio", "vllm", "llama-cpp"):
-            # All use OpenAI-compatible /v1/models
-            resp = client.get(f"{url}/v1/models")
-            if resp.status_code == 200:
-                data = resp.json()
-                loaded = [m["id"] for m in data.get("data", [])]
-                client.close()
-                return ServerStatus(
-                    server_type=server_type,
-                    url=url,
-                    running=True,
-                    models_loaded=loaded,
-                )
-
-        client.close()
     except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
         logger.debug(f"Server probe failed for {url} ({server_type}): {e}")
 
@@ -134,52 +130,47 @@ def list_models(server_url: str, server_type: str) -> list[LocalModel]:
         server_type: Type of server ("ollama", "lm-studio", "vllm", "llama-cpp")
     """
     try:
-        client = httpx.Client(timeout=10.0)
+        with httpx.Client(timeout=10.0) as client:
+            if server_type == "ollama":
+                resp = client.get(f"{server_url}/api/tags")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return [
+                        LocalModel(
+                            name=m["name"],
+                            size_bytes=m.get("size"),
+                            loaded=True,  # Ollama only lists loaded models here
+                            server_type="ollama",
+                        )
+                        for m in data.get("models", [])
+                    ]
 
-        if server_type == "ollama":
-            resp = client.get(f"{server_url}/api/tags")
-            client.close()
-            if resp.status_code == 200:
-                data = resp.json()
-                return [
-                    LocalModel(
-                        name=m["name"],
-                        size_bytes=m.get("size"),
-                        loaded=True,  # Ollama only lists loaded models here
-                        server_type="ollama",
-                    )
-                    for m in data.get("models", [])
-                ]
+            elif server_type == "lm-studio":
+                resp = client.get(f"{server_url}/v1/models")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return [
+                        LocalModel(
+                            name=m["id"],
+                            loaded=True,
+                            server_type="lm-studio",
+                        )
+                        for m in data.get("data", [])
+                    ]
 
-        elif server_type == "lm-studio":
-            resp = client.get(f"{server_url}/v1/models")
-            client.close()
-            if resp.status_code == 200:
-                data = resp.json()
-                return [
-                    LocalModel(
-                        name=m["id"],
-                        loaded=True,
-                        server_type="lm-studio",
-                    )
-                    for m in data.get("data", [])
-                ]
+            elif server_type in ("vllm", "llama-cpp"):
+                resp = client.get(f"{server_url}/v1/models")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return [
+                        LocalModel(
+                            name=m["id"],
+                            loaded=True,
+                            server_type=server_type,
+                        )
+                        for m in data.get("data", [])
+                    ]
 
-        elif server_type in ("vllm", "llama-cpp"):
-            resp = client.get(f"{server_url}/v1/models")
-            client.close()
-            if resp.status_code == 200:
-                data = resp.json()
-                return [
-                    LocalModel(
-                        name=m["id"],
-                        loaded=True,
-                        server_type=server_type,
-                    )
-                    for m in data.get("data", [])
-                ]
-
-        client.close()
     except Exception as e:
         logger.error(f"Failed to list models from {server_url}: {e}")
 
@@ -200,43 +191,37 @@ def load_model(server_url: str, server_type: str, model_name: str,
         True if model was loaded successfully
     """
     try:
-        client = httpx.Client(timeout=120.0)  # loading can be slow
+        with httpx.Client(timeout=120.0) as client:  # loading can be slow
+            if server_type == "ollama":
+                # Ollama loads models on demand; we can pre-warm with a generate call
+                payload = {"model": model_name, "prompt": "", "keep_alive": "10m"}
+                resp = client.post(f"{server_url}/api/generate", json=payload)
+                return resp.status_code == 200
 
-        if server_type == "ollama":
-            # Ollama loads models on demand; we can pre-warm with a generate call
-            payload = {"model": model_name, "prompt": "", "keep_alive": "10m"}
-            resp = client.post(f"{server_url}/api/generate", json=payload)
-            client.close()
-            return resp.status_code == 200
+            elif server_type == "lm-studio":
+                # LM Studio REST API for loading
+                payload: dict = {"model": model_name}
+                if context_length:
+                    payload["context_length"] = context_length
+                resp = client.post(f"{server_url}/api/v1/models/load", json=payload)
+                return resp.status_code == 200
 
-        elif server_type == "lm-studio":
-            # LM Studio REST API for loading
-            payload: dict = {"model": model_name}
-            if context_length:
-                payload["context_length"] = context_length
-            resp = client.post(f"{server_url}/api/v1/models/load", json=payload)
-            client.close()
-            return resp.status_code == 200
+            elif server_type == "vllm":
+                # vLLM doesn't support dynamic model loading — model is set at server start
+                logger.warning(
+                    "vLLM doesn't support dynamic model loading. "
+                    "Restart server with the desired model."
+                )
+                return False
 
-        elif server_type == "vllm":
-            # vLLM doesn't support dynamic model loading — model is set at server start
-            logger.warning(
-                "vLLM doesn't support dynamic model loading. "
-                "Restart server with the desired model."
-            )
-            client.close()
-            return False
+            elif server_type == "llama-cpp":
+                # llama.cpp server doesn't support dynamic model loading
+                logger.warning(
+                    "llama.cpp server doesn't support dynamic model loading. "
+                    "Restart server with the desired model."
+                )
+                return False
 
-        elif server_type == "llama-cpp":
-            # llama.cpp server doesn't support dynamic model loading
-            logger.warning(
-                "llama.cpp server doesn't support dynamic model loading. "
-                "Restart server with the desired model."
-            )
-            client.close()
-            return False
-
-        client.close()
     except Exception as e:
         logger.error(f"Failed to load model {model_name}: {e}")
 
@@ -246,21 +231,17 @@ def load_model(server_url: str, server_type: str, model_name: str,
 def unload_model(server_url: str, server_type: str, model_name: str) -> bool:
     """Unload a model from the local server."""
     try:
-        client = httpx.Client(timeout=30.0)
+        with httpx.Client(timeout=30.0) as client:
+            if server_type == "ollama":
+                payload = {"model": model_name, "keep_alive": 0}
+                resp = client.post(f"{server_url}/api/generate", json=payload)
+                return resp.status_code == 200
 
-        if server_type == "ollama":
-            payload = {"model": model_name, "keep_alive": 0}
-            resp = client.post(f"{server_url}/api/generate", json=payload)
-            client.close()
-            return resp.status_code == 200
+            elif server_type == "lm-studio":
+                payload = {"model": model_name}
+                resp = client.post(f"{server_url}/api/v1/models/unload", json=payload)
+                return resp.status_code == 200
 
-        elif server_type == "lm-studio":
-            payload = {"model": model_name}
-            resp = client.post(f"{server_url}/api/v1/models/unload", json=payload)
-            client.close()
-            return resp.status_code == 200
-
-        client.close()
     except Exception as e:
         logger.error(f"Failed to unload model {model_name}: {e}")
 
@@ -282,35 +263,33 @@ def pull_model(server_url: str, server_type: str, model_name: str,
         return False
 
     try:
-        client = httpx.Client(timeout=600.0)  # downloads can be very slow
+        with httpx.Client(timeout=600.0) as client:  # downloads can be very slow
+            with client.stream(
+                "POST",
+                f"{server_url}/api/pull",
+                json={"name": model_name, "stream": True},
+            ) as resp:
+                if resp.status_code != 200:
+                    return False
 
-        with client.stream(
-            "POST",
-            f"{server_url}/api/pull",
-            json={"name": model_name, "stream": True},
-        ) as resp:
-            if resp.status_code != 200:
-                return False
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        status = data.get("status", "")
+                        completed = data.get("completed", 0)
+                        total = data.get("total", 0)
 
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    status = data.get("status", "")
-                    completed = data.get("completed", 0)
-                    total = data.get("total", 0)
+                        if progress_callback:
+                            progress_callback(status, completed, total)
 
-                    if progress_callback:
-                        progress_callback(status, completed, total)
+                        if data.get("error"):
+                            logger.error(f"Pull error: {data['error']}")
+                            return False
+                    except json.JSONDecodeError:
+                        continue
 
-                    if data.get("error"):
-                        logger.error(f"Pull error: {data['error']}")
-                        return False
-                except json.JSONDecodeError:
-                    continue
-
-        client.close()
         return True
 
     except Exception as e:
@@ -324,11 +303,10 @@ def show_model_info(server_url: str, server_type: str, model_name: str) -> Optio
         return None
 
     try:
-        client = httpx.Client(timeout=10.0)
-        resp = client.post(f"{server_url}/api/show", json={"name": model_name})
-        client.close()
-        if resp.status_code == 200:
-            return resp.json()
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(f"{server_url}/api/show", json={"name": model_name})
+            if resp.status_code == 200:
+                return resp.json()
     except Exception as e:
         logger.debug(f"Failed to get model info: {e}")
 

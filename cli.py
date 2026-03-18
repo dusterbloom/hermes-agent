@@ -1693,7 +1693,7 @@ class HermesCLI:
         resolved_api_mode = runtime.get("api_mode", self.api_mode)
         resolved_acp_command = runtime.get("command")
         resolved_acp_args = list(runtime.get("args") or [])
-        if not isinstance(api_key, str) or not api_key:
+        if (not isinstance(api_key, str) or not api_key) and resolved_provider != "local":
             self.console.print("[bold red]Provider resolver returned an empty API key.[/]")
             return False
         if not isinstance(base_url, str) or not base_url:

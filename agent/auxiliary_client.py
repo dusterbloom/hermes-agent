@@ -632,7 +632,15 @@ def _try_custom_endpoint() -> Tuple[Optional[OpenAI], Optional[str]]:
     custom_base, custom_key = _resolve_custom_runtime()
     if not custom_base or not custom_key:
         return None, None
-    model = _read_main_model() or "gpt-4o-mini"
+    model = _read_main_model()
+    if not model:
+        try:
+            from agent.local_protocol import is_local_endpoint
+            if is_local_endpoint(custom_base):
+                return None, None  # No model configured; let _try_local_text handle it
+        except ImportError:
+            pass
+        model = "gpt-4o-mini"  # Cloud default only for non-local
     logger.debug("Auxiliary client: custom endpoint (%s)", model)
     return OpenAI(api_key=custom_key, base_url=custom_base), model
 
@@ -1158,6 +1166,12 @@ def resolve_vision_provider_client(
                 return _finalize(candidate, sync_client, default_model)
         logger.debug("Auxiliary vision client: none available")
         return None, None, None
+
+    if requested == "local":
+        # Explicit forced "local" bypasses the vision capability check — the
+        # user has opted in and knows what model they are using.
+        sync_client, default_model = _resolve_forced_provider("local")
+        return _finalize(requested, sync_client, default_model)
 
     if requested in _VISION_AUTO_PROVIDER_ORDER:
         sync_client, default_model = _resolve_strict_vision_backend(requested)

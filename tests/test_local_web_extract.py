@@ -47,6 +47,8 @@ _aux_mod = _stub(
     get_async_text_auxiliary_client=MagicMock(return_value=(None, "stub/model")),
     get_auxiliary_extra_body=MagicMock(return_value=None),
     auxiliary_max_tokens_param=MagicMock(return_value={}),
+    async_call_llm=AsyncMock(return_value=MagicMock()),
+    resolve_provider_client=MagicMock(return_value=(None, "stub/model")),
 )
 # Make it accessible via agent.auxiliary_client
 sys.modules["agent"].auxiliary_client = _aux_mod  # type: ignore[attr-defined]

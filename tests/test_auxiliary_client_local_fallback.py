@@ -87,6 +87,32 @@ def _real_auxiliary_client():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _block_cloud_providers(monkeypatch, _real_auxiliary_client):
+    """Block auth-file-based cloud providers so local fallback is reachable.
+
+    Tests in this file target local model routing.  On machines that have real
+    Anthropic/Copilot/Nous credentials stored in auth files, the cloud
+    providers win the auto-detection chain before the local fallback is ever
+    tried.
+
+    Depends on _real_auxiliary_client to ensure the real module is in
+    sys.modules before we patch it.
+
+    We do NOT patch _try_openrouter because it only reads OPENROUTER_API_KEY
+    from env vars, which _clear_local_envs() already deletes.  One test
+    (test_cloud_provider_takes_priority_over_local_text) intentionally sets
+    OPENROUTER_API_KEY and needs OpenRouter to win, so blocking it here would
+    break that test.
+    """
+    import sys
+    _mod = sys.modules["agent.auxiliary_client"]
+    _none = (None, None)
+    for name in ("_try_nous", "_try_custom_endpoint",
+                 "_try_codex", "_resolve_api_key_provider", "_try_anthropic"):
+        monkeypatch.setattr(_mod, name, lambda *a, **kw: _none)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

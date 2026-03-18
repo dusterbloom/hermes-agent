@@ -694,7 +694,9 @@ def resolve_provider(
     except Exception as e:
         logger.debug("Could not detect active auth provider: %s", e)
 
-    if os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY"):
+    _oai_key = os.getenv("OPENAI_API_KEY", "")
+    _or_key = os.getenv("OPENROUTER_API_KEY", "")
+    if (_oai_key and _oai_key.lower() != "local") or _or_key:
         return "openrouter"
 
     # Auto-detect API-key providers by checking their env vars
@@ -1695,9 +1697,11 @@ def resolve_local_runtime_credentials() -> Dict[str, Any]:
             code="local_server_not_found",
         )
 
+    from agent.local_models import get_openai_base_url
+    base_url = get_openai_base_url(server.url, server.server_type)
     return {
         "provider": "local",
-        "base_url": server.url.rstrip("/"),
+        "base_url": base_url.rstrip("/"),
         "api_key": "",
         "source": "auto-detected",
         "server_type": server.server_type,

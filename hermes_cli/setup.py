@@ -793,134 +793,6 @@ def _prompt_container_resources(config: dict):
 # Local-only setup helpers
 # =============================================================================
 
-def _append_env_var(env_path: str, key: str, value: str):
-    """Append or update an env var in the .env file."""
-    lines = []
-    found = False
-
-    if os.path.exists(env_path):
-        with open(env_path, "r") as f:
-            lines = f.readlines()
-
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-
-    if not found:
-        lines.append(f"{key}={value}\n")
-
-    os.makedirs(os.path.dirname(env_path), exist_ok=True)
-    with open(env_path, "w") as f:
-        f.writelines(lines)
-
-
-def _setup_local(config: dict) -> dict:
-    """Configure hermes for local-only operation."""
-    from agent.local_models import detect_running_servers, list_models, get_openai_base_url
-    from agent.hardware import detect_hardware, format_hardware_summary
-
-    print_header("Local-only Setup")
-    print_info("Detecting hardware...")
-    hw = detect_hardware()
-    print(format_hardware_summary(hw))
-
-    print_info("Detecting local servers...")
-    servers = detect_running_servers()
-
-    if not servers:
-        print()
-        print_warning("No local inference server detected!")
-        print_info("Please start one of:")
-        print_info("  Ollama:    ollama serve")
-        print_info("  LM Studio: Start the application")
-        print_info("  vLLM:      docker run --gpus all vllm/vllm-openai --model <name>")
-        print_info("  llama.cpp: ./llama-server -m <model.gguf>")
-        print()
-        print_info("Then run 'hermes setup' again.")
-        return config
-
-    # Show detected servers
-    print()
-    print_success(f"Found {len(servers)} running server(s):")
-    for i, s in enumerate(servers):
-        models_str = ", ".join(s.models_loaded[:3]) if s.models_loaded else "none loaded"
-        if len(s.models_loaded) > 3:
-            models_str += f" (+{len(s.models_loaded) - 3} more)"
-        print_info(f"  {i + 1}. {s.server_type} at {s.url} — models: {models_str}")
-
-    # Select server
-    if len(servers) == 1:
-        selected = servers[0]
-        print_info(f"Using {selected.server_type} at {selected.url}")
-    else:
-        server_choices = [f"{s.server_type} at {s.url}" for s in servers]
-        server_idx = prompt_choice("Select server:", server_choices, 0)
-        selected = servers[server_idx]
-
-    # List and select model
-    models = list_models(selected.url, selected.server_type)
-    if models:
-        print()
-        print_info("Available models:")
-        for i, m in enumerate(models):
-            size_str = f" ({m.size_bytes // (1024 ** 3)}GB)" if m.size_bytes else ""
-            print_info(f"  {i + 1}. {m.name}{size_str}")
-
-        model_choices = [m.name for m in models]
-        model_idx = prompt_choice("Select model:", model_choices, 0)
-        selected_model = models[model_idx]
-        model_name = selected_model.name
-    else:
-        model_name = prompt("No models found. Enter model name")
-        if not model_name:
-            print_warning("No model specified. Please load a model on your server.")
-            return config
-
-    # Configure
-    base_url = get_openai_base_url(selected.url, selected.server_type)
-
-    config["model"] = model_name
-    config.setdefault("local", {}).update({
-        "enabled": True,
-        "server_type": selected.server_type,
-        "server_url": selected.url,
-        "models_dir": "~/models",
-        "auto_context_sizing": True,
-        "protocol_mode": "auto",
-        "tool_call_mode": "auto",
-    })
-
-    # Write env vars
-    env_path = os.path.expanduser("~/.hermes/.env")
-    _append_env_var(env_path, "OPENAI_BASE_URL", base_url)
-    _append_env_var(env_path, "OPENAI_API_KEY", "local")
-    _append_env_var(env_path, "OPENAI_MODEL", model_name)
-
-    # Also save to config.yaml via save_env_value so the resolver picks it up
-    save_env_value("OPENAI_BASE_URL", base_url)
-    save_env_value("OPENAI_API_KEY", "local")
-    save_env_value("LLM_MODEL", model_name)
-
-    print()
-    print_success(f"Configured for local mode:")
-    print_info(f"  Server: {selected.server_type} at {selected.url}")
-    print_info(f"  Model:  {model_name}")
-    print_info(f"  Base URL: {base_url}")
-
-    # Suggest SearXNG for web search
-    print()
-    print_info("For web search without API keys, run SearXNG:")
-    print_info("  docker run -d -p 8888:8080 searxng/searxng")
-
-    return config
-
-
-# =============================================================================
-# Local-only setup helpers
-# =============================================================================
-
 
 def _append_env_var(env_path: str, key: str, value: str):
     """Append or update an env var in the .env file."""
@@ -1010,7 +882,11 @@ def _setup_local(config: dict) -> dict:
     # Configure
     base_url = get_openai_base_url(selected.url, selected.server_type)
 
-    config["model"] = model_name
+    config["model"] = {
+        "default": model_name,
+        "provider": "local",
+        "backend": "local",
+    }
     config.setdefault("local", {}).update({
         "enabled": True,
         "server_type": selected.server_type,
@@ -1042,6 +918,16 @@ def _setup_local(config: dict) -> dict:
     print()
     print_info("For web search without API keys, run SearXNG:")
     print_info("  docker run -d -p 8888:8080 searxng/searxng")
+
+    # Update auth.json so runtime provider resolution picks "local"
+    try:
+        from hermes_cli.auth import _load_auth_store, _save_auth_store, _auth_store_lock
+        with _auth_store_lock():
+            auth_store = _load_auth_store()
+            auth_store["active_provider"] = "local"
+            _save_auth_store(auth_store)
+    except Exception as e:
+        logger.debug("Failed to update auth store: %s", e)
 
     return config
 

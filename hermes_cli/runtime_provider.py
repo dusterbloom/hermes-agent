@@ -292,7 +292,7 @@ def resolve_runtime_provider(
             "provider": "local",
             "api_mode": "chat_completions",
             "base_url": creds.get("base_url", "").rstrip("/"),
-            "api_key": "",
+            "api_key": "local",
             "source": creds.get("source", "auto-detected"),
             "server_type": creds.get("server_type", "local"),
             "requested_provider": requested_provider,
