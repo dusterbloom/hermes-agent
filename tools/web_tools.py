@@ -683,7 +683,7 @@ async def _parallel_extract(urls: List[str]) -> List[Dict[str, Any]]:
 # SearXNG search backend (no API key required)
 # ---------------------------------------------------------------------------
 
-def _searxng_search(query: str, num_results: int = 10, searxng_url: str = None) -> list:
+async def _searxng_search(query: str, num_results: int = 10, searxng_url: str = None) -> list:
     """Search using a local SearXNG instance (no API key required).
 
     Args:
@@ -704,8 +704,8 @@ def _searxng_search(query: str, num_results: int = 10, searxng_url: str = None) 
     searxng_url = searxng_url.rstrip("/")
 
     try:
-        with httpx.Client(timeout=15.0) as client:
-            resp = client.get(
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
                 f"{searxng_url}/search",
                 params={
                     "q": query,
@@ -772,6 +772,47 @@ def _format_searxng_results(results: list) -> str:
     return "\n".join(lines)
 
 
+def _searxng_search_sync(query: str, num_results: int = 10, searxng_url: str = None) -> list:
+    """Synchronous SearXNG search using httpx.Client (safe to call from any context).
+
+    Avoids asyncio.run() which crashes when called from an existing event loop.
+    """
+    if not _httpx_available:
+        logger.debug("httpx not installed; SearXNG search unavailable")
+        return []
+
+    if searxng_url is None:
+        searxng_url = os.environ.get("SEARXNG_URL", "http://localhost:8888")
+
+    searxng_url = searxng_url.rstrip("/")
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(
+                f"{searxng_url}/search",
+                params={
+                    "q": query,
+                    "format": "json",
+                    "pageno": 1,
+                    "categories": "general",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = []
+            for item in data.get("results", [])[:num_results]:
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "content": item.get("content", ""),
+                })
+            return results
+    except Exception as e:
+        logger.warning("SearXNG search failed: %s", e)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Local web extraction (no API key required)
 # ---------------------------------------------------------------------------
@@ -791,14 +832,23 @@ async def _local_web_extract(url: str) -> Optional[str]:
     try:
         import trafilatura
 
-        # Download the page
-        downloaded = trafilatura.fetch_url(url)
+        # Download the page — blocking call, run in thread with timeout
+        try:
+            downloaded = await asyncio.wait_for(
+                asyncio.to_thread(trafilatura.fetch_url, url),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("trafilatura: fetch_url timed out for %s", url)
+            return None
+
         if not downloaded:
             logger.warning("trafilatura: Failed to download %s", url)
             return None
 
-        # Extract main content
-        result = trafilatura.extract(
+        # Extract main content — blocking call, run in thread
+        result = await asyncio.to_thread(
+            trafilatura.extract,
             downloaded,
             include_comments=False,
             include_tables=True,
@@ -949,7 +999,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         if not _firecrawl_available or (not os.getenv("FIRECRAWL_API_KEY") and not os.getenv("FIRECRAWL_API_URL")):
             logger.info("No Firecrawl credentials set; trying SearXNG fallback")
             if _is_searxng_available():
-                searxng_results = _searxng_search(query, num_results=limit)
+                searxng_results = _searxng_search_sync(query, num_results=limit)
                 formatted = _format_searxng_results(searxng_results)
                 result_json = json.dumps(
                     {"success": True, "backend": "searxng", "data": {"markdown": formatted}},
@@ -1764,10 +1814,10 @@ def check_firecrawl_api_key() -> bool:
 
 
 def check_web_search_available() -> bool:
-    """Check if any web search backend is available.
-    Always returns True — availability is checked at runtime with graceful fallback.
-    """
-    return True
+    """Web search is available if any API key is set OR SearXNG is running."""
+    if check_web_api_key():
+        return True
+    return _is_searxng_available()
 
 
 def check_web_extract_available() -> bool:
@@ -1937,8 +1987,8 @@ registry.register(
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=5),
-    check_fn=check_web_api_key,
-    requires_env=["PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
+    check_fn=check_web_search_available,
+    requires_env=[],
     emoji="🔍",
 )
 registry.register(

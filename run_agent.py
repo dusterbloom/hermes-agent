@@ -97,6 +97,8 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
+from agent.local_protocol import is_local_endpoint, format_messages_for_local
+from agent.model_capabilities import needs_strict_alternation, supports_native_tool_calling
 from utils import atomic_json_write
 
 HONCHO_TOOL_NAMES = {
@@ -512,7 +514,8 @@ class AIAgent:
         self.step_callback = step_callback
         self.stream_delta_callback = stream_delta_callback
         self._last_reported_tool = None  # Track for "new tool" mode
-        
+        self._textual_tool_mode = False  # True when tools injected into system prompt (local models)
+
         # Interrupt mechanism for breaking out of tool loops
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
@@ -3738,6 +3741,35 @@ class AIAgent:
 
             return kwargs
 
+        # ── Local protocol formatting ─────────────────────────────────
+        # Local models (Ollama, LM Studio, vLLM, llama.cpp) need message
+        # transforms: fold mid-thread system messages, inject continue
+        # sentinels after tool results, enforce strict turn alternation.
+        if is_local_endpoint(self.base_url):
+            api_messages = format_messages_for_local(
+                api_messages,
+                strict_alternation=needs_strict_alternation(self.model),
+            )
+
+        # ── Textual tool calling for local models without native support ──
+        # Models that don't support native function calling receive tool
+        # descriptions injected into the system prompt.  Their text output
+        # is later parsed back into structured tool_call objects (inbound).
+        if is_local_endpoint(self.base_url) and not supports_native_tool_calling(self.model) and self.tools:
+            from agent.tool_call_parser import format_tools_for_prompt
+            tool_prompt = format_tools_for_prompt(self.tools)
+            # Append tool descriptions to the first system message, or prepend
+            # a new one if no system message exists.
+            for i, msg in enumerate(api_messages):
+                if msg.get("role") == "system":
+                    api_messages[i] = {**msg, "content": msg.get("content", "") + "\n\n" + tool_prompt}
+                    break
+            else:
+                api_messages.insert(0, {"role": "system", "content": tool_prompt})
+            self._textual_tool_mode = True
+        else:
+            self._textual_tool_mode = False
+
         sanitized_messages = api_messages
         needs_sanitization = False
         for msg in api_messages:
@@ -3791,7 +3823,9 @@ class AIAgent:
         api_kwargs = {
             "model": self.model,
             "messages": sanitized_messages,
-            "tools": self.tools if self.tools else None,
+            # In textual tool mode tools are already injected into the system
+            # prompt; sending the tools parameter would confuse the API.
+            "tools": None if self._textual_tool_mode else (self.tools if self.tools else None),
             "timeout": float(os.getenv("HERMES_API_TIMEOUT", 900.0)),
         }
 
@@ -6127,6 +6161,32 @@ class AIAgent:
                         assistant_message.content = "\n".join(parts)
                     else:
                         assistant_message.content = str(raw)
+
+                # ── Inbound textual tool call parsing ──────────────────────
+                # Local models without native tool calling emit tool calls as
+                # text.  Parse them here so the rest of the agent loop sees
+                # standard tool_call objects regardless of the model's format.
+                if (
+                    self._textual_tool_mode
+                    and not getattr(assistant_message, "tool_calls", None)
+                    and assistant_message.content
+                ):
+                    from agent.tool_call_parser import parse_tool_calls, parsed_calls_to_openai_format
+                    from types import SimpleNamespace
+                    parsed = parse_tool_calls(assistant_message.content)
+                    if parsed:
+                        tool_call_dicts = parsed_calls_to_openai_format(parsed)
+                        assistant_message.tool_calls = [
+                            SimpleNamespace(
+                                id=tc["id"],
+                                type="function",
+                                function=SimpleNamespace(
+                                    name=tc["function"]["name"],
+                                    arguments=tc["function"]["arguments"],
+                                ),
+                            )
+                            for tc in tool_call_dicts
+                        ]
 
                 # Handle assistant response
                 if assistant_message.content and not self.quiet_mode:
