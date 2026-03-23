@@ -500,6 +500,43 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 [#F29C38]⠀⠀⠀⠀⠀⠀⠀⣼⡟⠀⠀⢻⣧⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [dim #7A3511]⠀⠀⠀⠀⠀⠀⠀tail flame lit⠀⠀⠀⠀⠀⠀⠀⠀[/]""",
     },
+    "editorial": {
+        "name": "editorial",
+        "description": "NYT meets terminal \u2014 muted palette, typographic hierarchy, easy on the eyes",
+        "colors": {
+            "banner_border": "#5C5C5C",
+            "banner_title": "#E8E0D4",
+            "banner_accent": "#B8A99A",
+            "banner_dim": "#6B6560",
+            "banner_text": "#D4CBC2",
+            "ui_accent": "#B8A99A",
+            "ui_label": "#8FA8B8",
+            "ui_ok": "#7A9E7A",
+            "ui_error": "#C47070",
+            "ui_warn": "#C4A870",
+            "prompt": "#E8E0D4",
+            "input_rule": "#4A4540",
+            "response_border": "#6B6560",
+            "session_label": "#8A8580",
+            "session_border": "#4A4540",
+        },
+        "branding": {
+            "agent_name": "hermes",
+            "welcome": "",
+            "goodbye": "",
+            "response_label": " hermes ",
+            "prompt_symbol": "\u276f ",
+            "help_header": "Commands",
+        },
+        "tool_prefix": "\u2506",
+        "spinner": {
+            "waiting_faces": [" . ", " .. ", " ... ", " .. "],
+            "thinking_faces": [" . ", " .. ", " ... ", " .. "],
+            "thinking_verbs": ["thinking", "considering", "working", "reasoning", "reflecting"],
+            "wings": [],
+        },
+        "tool_emojis": {},
+    },
 }
 
 
