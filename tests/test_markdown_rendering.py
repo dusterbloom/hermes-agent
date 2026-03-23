@@ -1,14 +1,8 @@
 """Tests for markdown rendering in AI responses (fixes raw **bold** display)."""
 import pytest
-import sys
-import types
+from pathlib import Path
 
-
-# Stub heavy dependencies that aren't installed in test env
-for mod_name in ["fire", "firecrawl", "fal_client", "litellm", "anthropic",
-                 "elevenlabs", "faster_whisper", "edge_tts"]:
-    if mod_name not in sys.modules:
-        sys.modules[mod_name] = types.ModuleType(mod_name)
+_CLI_PY = Path(__file__).parent.parent / "cli.py"
 
 
 class TestMarkdownImport:
@@ -16,8 +10,7 @@ class TestMarkdownImport:
 
     def test_markdown_imported_in_cli(self):
         """cli.py must import Markdown from rich.markdown."""
-        import importlib
-        source = open("/home/peppi/Dev/hermes-agent/cli.py").read()
+        source = _CLI_PY.read_text()
         assert "from rich.markdown import Markdown" in source, \
             "cli.py does not import rich.markdown.Markdown"
 
@@ -39,7 +32,7 @@ class TestNonStreamingUsesMarkdown:
 
     def test_panel_path_uses_markdown_not_raw_text(self):
         """In the non-streaming response branch, Panel content must be Markdown."""
-        source = open("/home/peppi/Dev/hermes-agent/cli.py").read()
+        source = _CLI_PY.read_text()
         # Find the Panel() call in the non-streaming path
         # It should use Markdown(response), not _rich_text_from_ansi(response)
         import re
@@ -53,19 +46,19 @@ class TestStreamingReRender:
 
     def test_stream_line_counter_exists(self):
         """The streaming path must track line count for re-render clearing."""
-        source = open("/home/peppi/Dev/hermes-agent/cli.py").read()
+        source = _CLI_PY.read_text()
         assert "_stream_line_count" in source, \
             "No _stream_line_count variable — streaming re-render won't work"
 
     def test_stream_full_text_accumulator_exists(self):
         """The streaming path must accumulate full text for markdown re-render."""
-        source = open("/home/peppi/Dev/hermes-agent/cli.py").read()
+        source = _CLI_PY.read_text()
         assert "_stream_full_text" in source, \
             "No _stream_full_text accumulator — streaming re-render won't work"
 
     def test_already_streamed_branch_does_not_just_pass(self):
         """The already_streamed branch must re-render, not just 'pass'."""
-        source = open("/home/peppi/Dev/hermes-agent/cli.py").read()
+        source = _CLI_PY.read_text()
         # Find the already_streamed branch — it should NOT just be 'pass'
         import re
         match = re.search(r'elif already_streamed:\s*\n\s*(pass|# Token)', source)
