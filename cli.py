@@ -446,6 +446,7 @@ except Exception:
 
 from rich import box as rich_box
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.markup import escape as _escape
 from rich.panel import Panel
 from rich.text import Text as _RichText
@@ -1053,6 +1054,8 @@ class HermesCLI:
         self._stream_buf = ""        # Partial line buffer for line-buffered rendering
         self._stream_started = False  # True once first delta arrives
         self._stream_box_opened = False  # True once the response box header is printed
+        self._stream_line_count = 0   # Lines printed during streaming (for MD re-render)
+        self._stream_full_text = ""   # Accumulated raw text for Markdown re-render
         
         # Configuration - priority: CLI args > env vars > config file
         # Model comes from: CLI arg or config.yaml (single source of truth).
@@ -1657,14 +1660,17 @@ class HermesCLI:
             w = shutil.get_terminal_size().columns
             fill = w - 2 - len(label)
             _cprint(f"\n{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+            self._stream_line_count += 2  # blank line + top border
 
         self._stream_buf += text
+        self._stream_full_text += text
 
         # Emit complete lines, keep partial remainder in buffer
         _tc = getattr(self, "_stream_text_ansi", "")
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
             _cprint(f"{_tc}{line}{_RST}" if _tc else line)
+            self._stream_line_count += 1
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
@@ -1675,11 +1681,13 @@ class HermesCLI:
             _tc = getattr(self, "_stream_text_ansi", "")
             _cprint(f"{_tc}{self._stream_buf}{_RST}" if _tc else self._stream_buf)
             self._stream_buf = ""
+            self._stream_line_count += 1  # partial line flushed
 
         # Close the response box
         if self._stream_box_opened:
             w = shutil.get_terminal_size().columns
             _cprint(f"{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
+            self._stream_line_count += 1  # bottom border
 
     def _reset_stream_state(self) -> None:
         """Reset streaming state before each agent invocation."""
@@ -1688,6 +1696,8 @@ class HermesCLI:
         self._stream_box_opened = False
         self._stream_text_ansi = ""
         self._stream_prefilt = ""
+        self._stream_line_count = 0
+        self._stream_full_text = ""
         self._in_reasoning_block = False
         self._reasoning_box_opened = False
         self._reasoning_buf = ""
@@ -5657,13 +5667,28 @@ class HermesCLI:
                     w = shutil.get_terminal_size().columns
                     _cprint(f"\n{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
                 elif already_streamed:
-                    # Response was already streamed token-by-token with box framing;
-                    # _flush_stream() already closed the box. Skip Rich Panel.
-                    pass
+                    # Clear raw streamed output and re-render with Rich Markdown.
+                    # The streaming path printed raw text token-by-token; now we
+                    # replace it with a properly formatted Markdown Panel.
+                    _sl_count = self._stream_line_count
+                    if _sl_count > 0 and response:
+                        # Move cursor up over all streamed lines and erase them
+                        sys.stdout.write(f"\033[{_sl_count}A\033[J")
+                        sys.stdout.flush()
+                        _chat_console = ChatConsole()
+                        _chat_console.print(Panel(
+                            Markdown(response),
+                            title=f"[{_resp_color} bold]{label}[/]",
+                            title_align="left",
+                            border_style=_resp_color,
+                            style=_resp_text,
+                            box=rich_box.HORIZONTALS,
+                            padding=(1, 2),
+                        ))
                 else:
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
-                        _rich_text_from_ansi(response),
+                        Markdown(response),
                         title=f"[{_resp_color} bold]{label}[/]",
                         title_align="left",
                         border_style=_resp_color,
