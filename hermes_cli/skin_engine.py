@@ -727,6 +727,11 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     warn = skin.get_color("ui_warn", "#FF8C00")
     error = skin.get_color("ui_error", "#FF6B6B")
 
+    accent = skin.get_color("ui_accent", "#FFBF00")
+    ok = skin.get_color("ui_ok", "#8FBC8F")
+    border = skin.get_color("response_border", "#FFD700")
+    session_border = skin.get_color("session_border", "#8B8682")
+
     return {
         "input-area": prompt,
         "placeholder": f"{dim} italic",
@@ -735,6 +740,15 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
         "hint": f"{dim} italic",
         "input-rule": input_rule,
         "image-badge": f"{label} bold",
+        # Status bar
+        "status-bar": f"bg:#1a1a2e {text}",
+        "status-bar-strong": f"bg:#1a1a2e {border} bold",
+        "status-bar-dim": f"bg:#1a1a2e {session_border}",
+        "status-bar-good": f"bg:#1a1a2e {ok} bold",
+        "status-bar-warn": f"bg:#1a1a2e {warn} bold",
+        "status-bar-bad": f"bg:#1a1a2e {accent} bold",
+        "status-bar-critical": f"bg:#1a1a2e {error} bold",
+        # Completion menu
         "completion-menu": f"bg:#1a1a2e {text}",
         "completion-menu.completion": f"bg:#1a1a2e {text}",
         "completion-menu.completion.current": f"bg:#333355 {title}",

@@ -67,11 +67,11 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
     2. Tool registry's per-tool ``emoji`` field
     3. *default* fallback
     """
-    # 1. Skin override
+    # 1. Skin override — an explicit empty string means "no emoji wanted"
     skin = _get_skin()
-    if skin and skin.tool_emojis:
+    if skin and skin.tool_emojis is not None:
         override = skin.tool_emojis.get(tool_name)
-        if override:
+        if override is not None:  # present in dict (even if "")
             return override
     # 2. Registry default
     try:

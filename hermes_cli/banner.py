@@ -27,10 +27,29 @@ logger = logging.getLogger(__name__)
 # ANSI building blocks for conversation display
 # =========================================================================
 
-_GOLD = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold
+_GOLD_FALLBACK = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold (fallback)
+_GOLD = _GOLD_FALLBACK  # kept for backward compat if imported directly
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RST = "\033[0m"
+
+
+def _skin_gold() -> str:
+    """Return the primary UI border color as a bold ANSI true-color escape.
+
+    Reads ``response_border`` from the active skin so that skins like
+    *editorial* actually change the response-box chrome.  Falls back to
+    the classic gold (#FFD700) if the skin engine is unavailable.
+    """
+    try:
+        from hermes_cli.skin_engine import get_active_skin
+        hex_color = get_active_skin().get_color("response_border", "#FFD700")
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        return f"\033[1;38;2;{r};{g};{b}m"
+    except Exception:
+        return _GOLD_FALLBACK
 
 
 def cprint(text: str):
