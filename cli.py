@@ -49,7 +49,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit import print_formatted_text as _pt_print
-from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+from prompt_toolkit.formatted_text import ANSI as _PT_ANSI, FormattedText as _PT_FormattedText
 try:
     from prompt_toolkit.cursor_shapes import CursorShape
     _STEADY_CURSOR = CursorShape.BLOCK  # Non-blinking block cursor
@@ -5673,8 +5673,9 @@ class HermesCLI:
                     _sl_count = self._stream_line_count
                     if _sl_count > 0 and response:
                         # Move cursor up over all streamed lines and erase them
-                        sys.stdout.write(f"\033[{_sl_count}A\033[J")
-                        sys.stdout.flush()
+                        _pt_print(_PT_FormattedText([
+                            ('[ZeroWidthEscape]', f'\033[{_sl_count}A\033[J'),
+                        ]))
                         _chat_console = ChatConsole()
                         _chat_console.print(Panel(
                             Markdown(response),
