@@ -1625,6 +1625,17 @@ class HermesCLI:
                 self._stream_prefilt = self._stream_prefilt[-max_tag_len:]
             return
 
+    @staticmethod
+    def _visual_line_count(text: str, columns: int) -> int:
+        """Return the number of visual terminal rows a printed line occupies."""
+        from wcwidth import wcswidth
+        from tools.ansi_strip import strip_ansi
+        clean = strip_ansi(text) if text else ""
+        w = wcswidth(clean)
+        if w <= 0 or w <= columns:
+            return 1
+        return -(-w // columns)  # ceil division
+
     def _emit_stream_text(self, text: str) -> None:
         """Emit filtered text to the streaming display."""
         if not text:
@@ -1670,7 +1681,7 @@ class HermesCLI:
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
             _cprint(f"{_tc}{line}{_RST}" if _tc else line)
-            self._stream_line_count += 1
+            self._stream_line_count += self._visual_line_count(line, shutil.get_terminal_size().columns)
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
@@ -1680,8 +1691,8 @@ class HermesCLI:
         if self._stream_buf:
             _tc = getattr(self, "_stream_text_ansi", "")
             _cprint(f"{_tc}{self._stream_buf}{_RST}" if _tc else self._stream_buf)
+            self._stream_line_count += self._visual_line_count(self._stream_buf, shutil.get_terminal_size().columns)
             self._stream_buf = ""
-            self._stream_line_count += 1  # partial line flushed
 
         # Close the response box
         if self._stream_box_opened:
