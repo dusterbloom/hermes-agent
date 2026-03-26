@@ -5485,9 +5485,6 @@ class HermesCLI:
         # Add user message to history
         self.conversation_history.append({"role": "user", "content": message})
 
-        ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
-        print(flush=True)
-        
         try:
             # Run the conversation with interrupt monitoring
             result = None
@@ -5742,6 +5739,7 @@ class HermesCLI:
                         padding=(1, 2),
                     ))
 
+            _cprint("")
 
             # Play terminal bell when agent finishes (if enabled).
             # Works over SSH — the bell propagates to the user's terminal.
@@ -7097,40 +7095,32 @@ class HermesCLI:
                     paste_match = _re.match(r'\[Pasted text #\d+: \d+ lines → (.+)\]', user_input) if isinstance(user_input, str) else None
                     if paste_match:
                         paste_path = Path(paste_match.group(1))
-                        _user_bar = f"[{_accent_hex()}]{'─' * 40}[/]"
                         if paste_path.exists():
                             full_text = paste_path.read_text(encoding="utf-8")
                             line_count = full_text.count('\n') + 1
-                            print()
-                            ChatConsole().print(_user_bar)
                             ChatConsole().print(
                                 f"[bold {_accent_hex()}]●[/] [bold]{_escape(f'[Pasted text: {line_count} lines]')}[/]"
                             )
                             user_input = full_text
                         else:
-                            print()
-                            ChatConsole().print(_user_bar)
                             ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]")
                     else:
-                        _user_bar = f"[{_accent_hex()}]{'─' * 40}[/]"
                         if '\n' in user_input:
                             first_line = user_input.split('\n')[0]
                             line_count = user_input.count('\n') + 1
-                            print()
-                            ChatConsole().print(_user_bar)
                             ChatConsole().print(
                                 f"[bold {_accent_hex()}]●[/] [bold]{_escape(first_line)}[/] "
                                 f"[dim](+{line_count - 1} lines)[/]"
                             )
                         else:
-                            print()
-                            ChatConsole().print(_user_bar)
                             ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]")
                     
                     # Show image attachment count
                     if submit_images:
                         n = len(submit_images)
                         _cprint(f"  {_DIM}📎 {n} image{'s' if n > 1 else ''} attached{_RST}")
+
+                    _cprint("")
 
                     # Regular chat - run agent
                     self._agent_running = True
