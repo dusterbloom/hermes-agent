@@ -53,7 +53,10 @@ class LcmQueryMixin:
     def search(self, query: str, limit: int = 10) -> list[tuple[int, dict[str, Any]]]:
         """Search messages in the store.
 
-        Uses semantic search if available, otherwise falls back to keyword search.
+        Priority order:
+        1. Semantic index (if enabled and available)
+        2. DAM retriever (if initialized and has indexed messages)
+        3. Keyword fallback
 
         Returns list of (msg_id, message) tuples.
         """
@@ -61,6 +64,15 @@ class LcmQueryMixin:
             ids = self.semantic_index.search(query, k=limit)
             if ids:
                 return self.store.get_many(ids)
+
+        retriever = getattr(self, "retriever", None)
+        if retriever is not None and retriever._pattern_cache:
+            scores = retriever.search(query, limit=limit)
+            if scores:
+                ids = [msg_id for msg_id, _ in scores]
+                results = self.store.get_many(ids)
+                if results:
+                    return results
 
         return self._keyword_search(query, limit)
 

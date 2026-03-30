@@ -58,24 +58,15 @@ class DAMRetriever:
     # Sync
     # ------------------------------------------------------------------
 
-    def sync_with_store(self) -> int:
-        """Index any new messages from the active LcmEngine's store.
+    def sync_from_store(self, store: Any) -> int:
+        """Index any new messages from an explicit store reference.
 
-        Reads messages from ``_last_indexed_id`` up to the current store
-        length, encodes them, and trains the network on the new batch.
+        Avoids the circular dependency introduced by ``sync_with_store()``
+        (which calls ``get_engine()``).  The engine passes ``self.store``
+        directly so there is no global state involved.
 
         Returns the count of newly indexed messages.
         """
-        try:
-            from agent.lcm.tools import get_engine
-        except ImportError:
-            return 0
-
-        engine = get_engine()
-        if engine is None:
-            return 0
-
-        store = engine.store
         total = len(store)
         new_messages: list[np.ndarray] = []
         new_ids: list[int] = []
@@ -95,6 +86,25 @@ class DAMRetriever:
             self._last_indexed_id = total
 
         return len(new_ids)
+
+    def sync_with_store(self) -> int:
+        """Index any new messages from the active LcmEngine's store.
+
+        Reads messages from ``_last_indexed_id`` up to the current store
+        length, encodes them, and trains the network on the new batch.
+
+        Returns the count of newly indexed messages.
+        """
+        try:
+            from agent.lcm.tools import get_engine
+        except ImportError:
+            return 0
+
+        engine = get_engine()
+        if engine is None:
+            return 0
+
+        return self.sync_from_store(engine.store)
 
     # ------------------------------------------------------------------
     # Search

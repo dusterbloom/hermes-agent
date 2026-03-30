@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum, auto
 from typing import Any, Optional
 
@@ -104,6 +105,22 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
         semantic_config = SemanticIndexConfig(enabled=config.semantic_search)
         self.semantic_index = create_semantic_index(semantic_config)
 
+        # DAM retriever (optional — requires numpy)
+        self.retriever = None
+        self._dam_sync_interval: int = 5
+        self._dam_messages_since_sync: int = 0
+        try:
+            from agent.lcm.dam import DenseAssociativeMemory, MessageEncoder, DAMRetriever
+            self.retriever = DAMRetriever(
+                net=DenseAssociativeMemory(nv=2048, nh=64),
+                enc=MessageEncoder(nv=2048),
+            )
+        except (ImportError, Exception):
+            pass  # numpy not available or DAM init failed
+
+        # Compaction effectiveness metrics
+        self.metrics: dict = self._empty_metrics()
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -119,6 +136,50 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
         self.token_estimator.context_length = value
 
     # ------------------------------------------------------------------
+    # Metrics helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _empty_metrics() -> dict:
+        """Return a fresh zeroed metrics dict."""
+        return {
+            "total_compactions": 0,
+            "tokens_saved": 0,
+            "tokens_before_total": 0,
+            "tokens_after_total": 0,
+            "levels": {1: 0, 2: 0, 3: 0},
+            "last_compaction_time": None,
+            "avg_compression_ratio": 0.0,
+        }
+
+    def _record_compaction_metrics(
+        self,
+        original_tokens: int,
+        summary_text: str,
+        level: int,
+    ) -> None:
+        """Update self.metrics after a successful compaction.
+
+        Uses ``len(summary_text) // 4`` as a rough token estimate for the
+        summary so we don't pay for expensive counting in the hot path.
+        """
+        summary_tokens = len(summary_text) // 4
+
+        self.metrics["total_compactions"] += 1
+        self.metrics["tokens_before_total"] += original_tokens
+        self.metrics["tokens_after_total"] += summary_tokens
+        self.metrics["tokens_saved"] += max(0, original_tokens - summary_tokens)
+        self.metrics["levels"][level] = self.metrics["levels"].get(level, 0) + 1
+        self.metrics["last_compaction_time"] = datetime.now(timezone.utc).isoformat()
+
+        # Running average: avg = total_after / total_before
+        before_total = self.metrics["tokens_before_total"]
+        after_total = self.metrics["tokens_after_total"]
+        self.metrics["avg_compression_ratio"] = (
+            after_total / before_total if before_total > 0 else 0.0
+        )
+
+    # ------------------------------------------------------------------
     # Ingestion
     # ------------------------------------------------------------------
 
@@ -127,11 +188,28 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
 
         Returns the stable MessageId assigned by the store.
         After appending, auto-prunes the store if it exceeds max_store_size.
+        Periodically syncs the DAM retriever (every _dam_sync_interval messages).
         """
         msg_id = self.store.append(message)
         self.active.append(ContextEntry.raw(msg_id, message))
         self._maybe_prune_store()
+
+        # Auto-sync DAM retriever every N messages
+        self._dam_messages_since_sync += 1
+        if self.retriever is not None and self._dam_messages_since_sync >= self._dam_sync_interval:
+            self._sync_dam()
+
         return msg_id
+
+    def _sync_dam(self) -> None:
+        """Sync the DAM retriever with the current store contents."""
+        if self.retriever is None:
+            return
+        try:
+            self.retriever.sync_from_store(self.store)
+            self._dam_messages_since_sync = 0
+        except Exception as exc:
+            logger.warning("DAM sync failed: %s", exc)
 
     def _referenced_store_ids(self) -> set[int]:
         """Collect all MessageIds referenced by active DAG summaries."""
@@ -309,6 +387,8 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
 
             self.active[block_start:block_end] = [summary_entry]
             self._async_compaction_pending = False
+
+        self._record_compaction_metrics(tokens, summary_text, level)
 
         logger.info(
             "LCM: Compacted %d messages into summary node %d (~%d tokens saved)",

@@ -16,6 +16,7 @@ class LcmFormatMixin:
     - self.expand(msg_ids) -> list[tuple[MessageId, dict]]
     - self.active_token_breakdown() -> dict
     - self.get_pinned() -> list[int]
+    - self.metrics: dict  (for format_metrics)
     """
 
     def format_expanded(self, msg_ids: list) -> str:
@@ -60,5 +61,34 @@ class LcmFormatMixin:
             f"  Store total    : {len(self.store)} messages (immutable)",
             f"  Context limit  : {self.context_length:,} tokens",
             f"  Pinned IDs     : {self.get_pinned() or 'none'}",
+        ]
+        return "\n".join(lines)
+
+    def format_metrics(self) -> str:
+        """Format a human-readable summary of compaction effectiveness metrics."""
+        m = self.metrics
+        total = m["total_compactions"]
+        saved = m["tokens_saved"]
+        before = m["tokens_before_total"]
+        after = m["tokens_after_total"]
+        avg_ratio = m.get("avg_compression_ratio", 0.0)
+        last_time = m["last_compaction_time"] or "never"
+        levels: dict = m.get("levels", {})
+
+        level_parts = ", ".join(
+            f"L{lvl}={count}" for lvl, count in sorted(levels.items())
+        )
+
+        compression_pct = round((1.0 - avg_ratio) * 100, 1) if before > 0 else 0.0
+
+        lines = [
+            "LCM Compaction Metrics:",
+            f"  Total compactions    : {total}",
+            f"  Tokens before (total): {before}",
+            f"  Tokens after  (total): {after}",
+            f"  Tokens saved  (total): {saved}",
+            f"  Avg compression      : {compression_pct}% ({avg_ratio:.3f} ratio)",
+            f"  Level distribution   : {level_parts or 'none'}",
+            f"  Last compaction      : {last_time}",
         ]
         return "\n".join(lines)
