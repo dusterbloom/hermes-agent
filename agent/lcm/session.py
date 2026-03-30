@@ -47,10 +47,11 @@ class LcmSessionMixin:
         from agent.lcm.engine import ContextEntry
 
         engine = cls(config, model, provider, context_length)
-        messages = session_data.get("messages", [])
-        lcm_meta = session_data.get("lcm", {})
-        summaries = lcm_meta.get("summaries", [])
-        original_messages = lcm_meta.get("original_messages", [])
+        messages = session_data.get("messages") or []
+        # Tolerate "lcm": null (JSON null → Python None) and missing key
+        lcm_meta = session_data.get("lcm") or {}
+        summaries = lcm_meta.get("summaries") or []
+        original_messages = lcm_meta.get("original_messages") or []
 
         for msg in original_messages:
             engine.store.append(msg)
@@ -82,11 +83,37 @@ class LcmSessionMixin:
                     msg_id = engine.store.append(msg)
                 engine.active.append(ContextEntry.raw(msg_id, msg))
 
-        pinned_ids = lcm_meta.get("pinned", [])
-        valid_pins = {pid for pid in pinned_ids if pid < len(engine.store)}
+        pinned_ids = lcm_meta.get("pinned") or []
+        store_size = len(engine.store)
+        valid_pins = {pid for pid in pinned_ids if 0 <= pid < store_size}
+        dropped_pins = set(pinned_ids) - valid_pins
+        if dropped_pins:
+            logger.warning(
+                "LCM: Dropped %d out-of-range pinned ID(s) during rebuild: %s",
+                len(dropped_pins),
+                sorted(dropped_pins),
+            )
         engine._pinned_ids = valid_pins
 
         engine._last_summary = lcm_meta.get("last_summary")
+
+        # Restore metrics if present
+        saved_metrics = lcm_meta.get("metrics")
+        if saved_metrics:
+            # Import here to avoid circular imports; _empty_metrics lives in engine
+            from agent.lcm.engine import LcmEngine as _LcmEngine
+            base = _LcmEngine._empty_metrics()
+            base.update(saved_metrics)
+            # Ensure levels dict has all expected keys
+            for lvl in (1, 2, 3):
+                base["levels"].setdefault(lvl, 0)
+            engine.metrics = base
+
+        # Restore DAM retriever state to avoid re-indexing on restart
+        saved_dam = lcm_meta.get("dam") or {}
+        if saved_dam and getattr(engine, "retriever", None) is not None:
+            last_indexed_id = saved_dam.get("last_indexed_id", 0)
+            engine.retriever._last_indexed_id = last_indexed_id
 
         logger.info(
             "LCM: Rebuilt from session: %d messages, %d summaries, %d pinned",
@@ -114,12 +141,23 @@ class LcmSessionMixin:
             if msg is not None:
                 original_messages.append(msg)
 
+        # Persist DAM retriever state so rebuild can skip re-indexing
+        dam_state: dict = {}
+        retriever = getattr(self, "retriever", None)
+        if retriever is not None:
+            dam_state = {
+                "last_indexed_id": retriever._last_indexed_id,
+                "n_patterns_trained": retriever.net.n_patterns_trained,
+            }
+
         return {
             "summaries": summaries,
             "original_messages": original_messages,
             "store_size": len(self.store),
             "pinned": sorted(self._pinned_ids),
             "last_summary": self._last_summary,
+            "metrics": dict(self.metrics),
+            "dam": dam_state,
         }
 
     def reset(self):
@@ -132,3 +170,6 @@ class LcmSessionMixin:
         self._last_summary = None
         self.summarizer.reset()
         self.semantic_index.clear()
+        # Import here to avoid circular imports; _empty_metrics lives in engine
+        from agent.lcm.engine import LcmEngine as _LcmEngine
+        self.metrics = _LcmEngine._empty_metrics()
