@@ -1191,18 +1191,20 @@ class AIAgent:
         # Context probing flag - set when we step down from a context error
         self._context_probed = False
         
-        # Register LCM tools into the active tool surface
+        # Register LCM engine for internal use; only expose tools when tools are enabled
         from agent.lcm.tools import set_engine as _lcm_set_engine, LCM_TOOL_SCHEMAS
         _lcm_set_engine(self.lcm_engine)
-        _lcm_tool_defs = [
-            {"type": "function", "function": schema}
-            for schema in LCM_TOOL_SCHEMAS.values()
-        ]
-        if self.tools is None:
-            self.tools = _lcm_tool_defs
-        else:
+        # Only add LCM tools to the tool surface if tools are enabled
+        if self.tools is not None and len(self.tools) > 0:
+            _lcm_tool_defs = [
+                {"type": "function", "function": schema}
+                for schema in LCM_TOOL_SCHEMAS.values()
+            ]
             self.tools = list(self.tools) + _lcm_tool_defs
-        self.valid_tool_names.update(LCM_TOOL_SCHEMAS.keys())
+            self.valid_tool_names.update(LCM_TOOL_SCHEMAS.keys())
+
+        # Context pressure warning flag — reset to False on init and after compaction
+        self._context_pressure_warned = False
 
         # Cumulative token usage for the session
         self.session_prompt_tokens = 0
