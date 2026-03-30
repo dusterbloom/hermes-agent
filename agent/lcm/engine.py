@@ -120,10 +120,38 @@ class LcmEngine:
         """Append a message to the store and active list.
 
         Returns the stable MessageId assigned by the store.
+        After appending, auto-prunes the store if it exceeds max_store_size.
         """
         msg_id = self.store.append(message)
         self.active.append(ContextEntry.raw(msg_id, message))
+        self._maybe_prune_store()
         return msg_id
+
+    def _referenced_store_ids(self) -> set[int]:
+        """Collect all MessageIds referenced by active DAG summaries."""
+        referenced: set[int] = set()
+        for node in self.dag.nodes:
+            referenced.update(self.dag.all_source_ids(node.id))
+        return referenced
+
+    def _maybe_prune_store(self) -> int:
+        """Prune the store if it exceeds config.max_store_size.
+
+        Protected IDs = pinned + referenced by active summaries.
+
+        Returns the number of messages pruned (0 if no pruning needed).
+        """
+        if self.store.active_count <= self.config.max_store_size:
+            return 0
+
+        keep_ids = self._pinned_ids | self._referenced_store_ids()
+        pruned = self.store.prune(keep_ids=keep_ids, max_size=self.config.max_store_size)
+        if pruned:
+            logger.info(
+                "LCM: Auto-pruned %d messages from store (active=%d, limit=%d)",
+                pruned, self.store.active_count, self.config.max_store_size,
+            )
+        return pruned
 
     # ------------------------------------------------------------------
     # Queries
@@ -376,9 +404,27 @@ class LcmEngine:
         return self.store.get_many(msg_ids)
 
     def expand_summary(self, node_id: int) -> list[tuple[MessageId, dict[str, Any]]]:
-        """Recursively expand all source messages for a DAG node."""
+        """Recursively expand all source messages for a DAG node.
+
+        Pruned messages are returned as placeholder entries with content
+        '[Message pruned from store]' so callers always receive a result
+        for every source ID.
+        """
         all_ids = self.dag.all_source_ids(node_id)
-        return self.store.get_many(all_ids)
+        result: list[tuple[MessageId, dict[str, Any]]] = []
+        for mid in all_ids:
+            msg = self.store.get(mid)
+            if msg is None:
+                # Either out-of-range or pruned — return a placeholder
+                placeholder: dict[str, Any] = {
+                    "role": "user",
+                    "content": "[Message pruned from store]",
+                    "_lcm_pruned": True,
+                }
+                result.append((mid, placeholder))
+            else:
+                result.append((mid, msg))
+        return result
 
     def focus_summary(self, node_id: int) -> bool:
         """Expand a summary entry back into raw messages in the active list.

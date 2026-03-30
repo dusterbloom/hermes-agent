@@ -24,6 +24,7 @@ class LcmConfig:
     summary_model: str = ""
     max_pinned: int = 20
     semantic_search: bool = False
+    max_store_size: int = 1000
 
     @classmethod
     def from_dict(cls, d: dict) -> "LcmConfig":
@@ -36,4 +37,5 @@ class LcmConfig:
             summary_model=str(d.get("summary_model", "")),
             max_pinned=int(d.get("max_pinned", 20)),
             semantic_search=str(d.get("semantic_search", False)).lower() in ("true", "1", "yes"),
+            max_store_size=int(d.get("max_store_size", 1000)),
         )

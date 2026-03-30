@@ -363,6 +363,11 @@ class SessionEntry:
     was_auto_reset: bool = False
     auto_reset_reason: Optional[str] = None  # "idle" or "daily"
     reset_had_activity: bool = False  # whether the expired session had any messages
+
+    # LCM engine state — populated from LcmEngine.to_session_metadata() on
+    # compression/save so the engine can be reconstructed on session resume.
+    # None means no LCM compaction has occurred (or this is a legacy session).
+    lcm_metadata: Optional[Dict[str, Any]] = None
     
     # Set by the background expiry watcher after it successfully flushes
     # memories for this session.  Persisted to sessions.json so the flag
@@ -391,6 +396,8 @@ class SessionEntry:
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
+        if self.lcm_metadata is not None:
+            result["lcm"] = self.lcm_metadata
         return result
     
     @classmethod
@@ -424,6 +431,7 @@ class SessionEntry:
             estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
             cost_status=data.get("cost_status", "unknown"),
             memory_flushed=data.get("memory_flushed", False),
+            lcm_metadata=data.get("lcm"),
         )
 
 
