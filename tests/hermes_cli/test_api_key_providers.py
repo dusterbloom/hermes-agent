@@ -247,10 +247,40 @@ class TestResolveProvider:
         assert resolve_provider("auto") == "minimax-cn"
 
     def test_auto_detects_ai_gateway_key(self, monkeypatch):
+        # Clear keys that would match a higher-priority provider first:
+        # OPENAI/OpenRouter short-circuit before the per-provider loop.
+        # In PROVIDER_REGISTRY, zai, kimi-coding, minimax, anthropic, alibaba,
+        # minimax-cn, and deepseek all appear before ai-gateway.
+        for var in (
+            "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+            "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
+            "KIMI_API_KEY",
+            "MINIMAX_API_KEY",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+            "DASHSCOPE_API_KEY",
+            "MINIMAX_CN_API_KEY",
+            "DEEPSEEK_API_KEY",
+        ):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gw-key")
         assert resolve_provider("auto") == "ai-gateway"
 
     def test_auto_detects_kilocode_key(self, monkeypatch):
+        # Clear all higher-priority provider keys first
+        for var in (
+            "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+            "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
+            "KIMI_API_KEY",
+            "MINIMAX_API_KEY",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+            "DASHSCOPE_API_KEY",
+            "MINIMAX_CN_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "AI_GATEWAY_API_KEY",
+            "OPENCODE_ZEN_API_KEY",
+            "OPENCODE_GO_API_KEY",
+        ):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("KILOCODE_API_KEY", "test-kilo-key")
         assert resolve_provider("auto") == "kilocode"
 
@@ -265,6 +295,22 @@ class TestResolveProvider:
         assert resolve_provider("auto") == "openrouter"
 
     def test_auto_does_not_select_copilot_from_github_token(self, monkeypatch):
+        # Clear all provider keys that would take priority over openrouter
+        for var in (
+            "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+            "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
+            "KIMI_API_KEY",
+            "MINIMAX_API_KEY",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+            "DASHSCOPE_API_KEY",
+            "MINIMAX_CN_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "AI_GATEWAY_API_KEY",
+            "OPENCODE_ZEN_API_KEY",
+            "OPENCODE_GO_API_KEY",
+            "KILOCODE_API_KEY",
+        ):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("GITHUB_TOKEN", "gh-test-token")
         with pytest.raises(AuthError, match="No inference provider configured"):
             resolve_provider("auto")

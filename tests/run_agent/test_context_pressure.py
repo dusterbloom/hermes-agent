@@ -162,7 +162,7 @@ class TestContextPressureFlags:
         compressor.context_length = 200_000
         compressor.threshold_tokens = 100_000  # 50%
 
-        agent._emit_context_pressure(0.85, compressor)
+        agent._emit_context_pressure(0.85)
 
         cb.assert_called_once()
         args = cb.call_args[0]
@@ -178,7 +178,7 @@ class TestContextPressureFlags:
         compressor.threshold_tokens = 100_000
 
         # Should not raise
-        agent._emit_context_pressure(0.60, compressor)
+        agent._emit_context_pressure(0.60)
 
     def test_emit_prints_for_cli_platform(self, agent, capsys):
         """CLI platform should always print context pressure, even in quiet_mode."""
@@ -190,7 +190,7 @@ class TestContextPressureFlags:
         compressor.context_length = 200_000
         compressor.threshold_tokens = 100_000
 
-        agent._emit_context_pressure(0.85, compressor)
+        agent._emit_context_pressure(0.85)
         captured = capsys.readouterr()
         assert "▰" in captured.out
         assert "to compaction" in captured.out
@@ -204,7 +204,7 @@ class TestContextPressureFlags:
         compressor.context_length = 200_000
         compressor.threshold_tokens = 100_000
 
-        agent._emit_context_pressure(0.85, compressor)
+        agent._emit_context_pressure(0.85)
         captured = capsys.readouterr()
         assert "▰" not in captured.out
 
@@ -245,4 +245,4 @@ class TestContextPressureFlags:
         compressor.threshold_tokens = 100_000
 
         # Should not raise
-        agent._emit_context_pressure(0.85, compressor)
+        agent._emit_context_pressure(0.85)

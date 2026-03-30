@@ -81,7 +81,7 @@ def test_anthropic_cache_read_and_creation_added(monkeypatch):
     agent = _make_agent(monkeypatch, "anthropic_messages", "anthropic",
                         lambda: _anthropic_resp(3, 10, cache_read=15000, cache_creation=2000))
     agent.run_conversation("hi")
-    assert agent.context_compressor.last_prompt_tokens == 17003  # 3+15000+2000
+    assert agent.session_prompt_tokens == 17003  # 3+15000+2000
     assert agent.session_prompt_tokens == 17003
 
 
@@ -89,14 +89,14 @@ def test_anthropic_no_cache_fields(monkeypatch):
     agent = _make_agent(monkeypatch, "anthropic_messages", "anthropic",
                         lambda: _anthropic_resp(500, 20))
     agent.run_conversation("hi")
-    assert agent.context_compressor.last_prompt_tokens == 500
+    assert agent.session_prompt_tokens == 500
 
 
 def test_anthropic_cache_read_only(monkeypatch):
     agent = _make_agent(monkeypatch, "anthropic_messages", "anthropic",
                         lambda: _anthropic_resp(5, 15, cache_read=17666, cache_creation=15))
     agent.run_conversation("hi")
-    assert agent.context_compressor.last_prompt_tokens == 17686  # 5+17666+15
+    assert agent.session_prompt_tokens == 17686  # 5+17666+15
 
 
 # -- OpenAI: prompt_tokens already total --
@@ -111,7 +111,7 @@ def test_openai_prompt_tokens_unchanged(monkeypatch):
     )
     agent = _make_agent(monkeypatch, "chat_completions", "openrouter", resp)
     agent.run_conversation("hi")
-    assert agent.context_compressor.last_prompt_tokens == 5000
+    assert agent.session_prompt_tokens == 5000
 
 
 # -- Codex: no cache fields, getattr returns 0 --
@@ -124,4 +124,4 @@ def test_codex_no_cache_fields(monkeypatch):
     )
     agent = _make_agent(monkeypatch, "codex_responses", "openai-codex", resp)
     agent.run_conversation("hi")
-    assert agent.context_compressor.last_prompt_tokens == 3000
+    assert agent.session_prompt_tokens == 3000
