@@ -1,11 +1,8 @@
 """Tests for DAM message encoder."""
 import pytest
 import numpy as np
-from pathlib import Path
-import sys
 
-sys.path.insert(0, str(Path.home() / ".hermes/plugins/hermes-dam"))
-from encoder import MessageEncoder
+from agent.lcm.dam.encoder import MessageEncoder
 
 
 class TestEncode:

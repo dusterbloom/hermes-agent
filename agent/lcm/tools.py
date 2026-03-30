@@ -1,26 +1,26 @@
 """LCM agent tools — give the agent active control over its context window."""
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any
 
 from agent.lcm.engine import LcmEngine
 
 # ---------------------------------------------------------------------------
-# Module-level engine reference
+# Per-context engine reference (thread- and task-safe via ContextVar)
 # ---------------------------------------------------------------------------
 
-_engine_ref: LcmEngine | None = None
+_engine_var: ContextVar[LcmEngine | None] = ContextVar("lcm_engine", default=None)
 
 
 def set_engine(engine: LcmEngine | None) -> None:
     """Register the active LcmEngine instance used by all tool handlers."""
-    global _engine_ref
-    _engine_ref = engine
+    _engine_var.set(engine)
 
 
 def get_engine() -> LcmEngine | None:
     """Return the currently registered LcmEngine, or None."""
-    return _engine_ref
+    return _engine_var.get()
 
 
 def _require_engine() -> LcmEngine | str:
