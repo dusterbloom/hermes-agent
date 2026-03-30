@@ -125,13 +125,15 @@ class TestEscalatedSummary:
             assert len(text) > 0  # deterministic always produces output
 
     def test_llm_exception_falls_through(self):
-        """If LLM call raises an exception, fall through to next level."""
+        """If LLM call returns None (signals failure), fall through to Level 3."""
         messages = [
             {"role": "user", "content": "Content " + "x" * 200},
             {"role": "assistant", "content": "Reply " + "y" * 200},
         ]
         with patch("agent.lcm.escalation._call_summary_llm") as mock_llm:
-            mock_llm.side_effect = Exception("API timeout")
+            # _call_summary_llm catches exceptions internally and returns None.
+            # Returning None from both L1 and L2 should trigger L3 fallback.
+            mock_llm.return_value = None
             text, level = escalated_summary(messages, target_tokens=100, deterministic_target=50)
             assert level == 3  # fell all the way to deterministic
 

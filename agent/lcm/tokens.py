@@ -150,9 +150,15 @@ class TokenEstimator:
         total = 0
 
         for msg in messages:
-            # Content
-            content = str(msg.get("content") or "")
-            total += len(self._encoding.encode(content))
+            # Content — handle multimodal (list of parts) separately from plain strings
+            content = msg.get("content") or ""
+            if isinstance(content, list):
+                # Multimodal: count text parts only; skip image/binary parts
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") in ("text", "input_text"):
+                        total += len(self._encoding.encode(str(part.get("text", ""))))
+            else:
+                total += len(self._encoding.encode(str(content)))
 
             # Tool calls
             for tc in msg.get("tool_calls") or []:
