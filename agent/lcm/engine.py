@@ -10,12 +10,16 @@ This is the core of the unified LCM system, combining:
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Optional
 
 from agent.lcm.config import LcmConfig
 from agent.lcm.dag import MessageId, SummaryDag, SummaryNode
+from agent.lcm.format import LcmFormatMixin
+from agent.lcm.query import LcmQueryMixin
+from agent.lcm.session import LcmSessionMixin
 from agent.lcm.store import ImmutableStore
 from agent.lcm.summarizer import Summarizer, SummarizerConfig
 from agent.lcm.tokens import TokenEstimator, TokenEstimatorConfig
@@ -46,7 +50,7 @@ class ContextEntry:
         return cls(kind="summary", msg_id=None, node_id=node_id, message=message)
 
 
-class LcmEngine:
+class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
     """Core context management engine.
 
     Maintains an append-only store of all ingested messages and a mutable
@@ -54,9 +58,10 @@ class LcmEngine:
     replaces a contiguous run of raw entries with a single summary entry,
     recording the mapping in the DAG so originals can always be recovered.
 
-    This unified implementation is independent of ContextCompressor and
-    provides accurate token estimation, structured summarization, and
-    optional semantic search.
+    Query, formatting, and session persistence are provided by mixins:
+    - LcmQueryMixin: active_messages, active_tokens, search, ...
+    - LcmFormatMixin: format_expanded, format_toc, format_budget
+    - LcmSessionMixin: rebuild_from_session, to_session_metadata, reset
     """
 
     def __init__(
@@ -79,6 +84,7 @@ class LcmEngine:
         self._async_compaction_pending: bool = False
         self._pinned_ids: set[int] = set()
         self._last_summary: Optional[str] = None
+        self._compact_lock: threading.Lock = threading.Lock()
 
         # Token estimator
         token_config = TokenEstimatorConfig(
@@ -154,34 +160,6 @@ class LcmEngine:
         return pruned
 
     # ------------------------------------------------------------------
-    # Queries
-    # ------------------------------------------------------------------
-
-    def active_messages(self) -> list[dict[str, Any]]:
-        """Return message dicts for all active entries, in order."""
-        return [entry.message for entry in self.active]
-
-    def active_tokens(self) -> int:
-        """Estimate tokens currently in the active context."""
-        return self.token_estimator.estimate(self.active_messages())
-
-    def active_token_breakdown(self) -> dict[str, int]:
-        """Return token breakdown for active context."""
-        raw_entries = [e for e in self.active if e.kind == "raw"]
-        summary_entries = [e for e in self.active if e.kind == "summary"]
-
-        raw_tokens = self.token_estimator.estimate([e.message for e in raw_entries])
-        summary_tokens = self.token_estimator.estimate([e.message for e in summary_entries])
-
-        return {
-            "total": raw_tokens + summary_tokens,
-            "raw": raw_tokens,
-            "summary": summary_tokens,
-            "raw_count": len(raw_entries),
-            "summary_count": len(summary_entries),
-        }
-
-    # ------------------------------------------------------------------
     # Threshold checking
     # ------------------------------------------------------------------
 
@@ -240,13 +218,11 @@ class LcmEngine:
         protect = self.config.protect_last_n
         total = len(self.active)
 
-        # Need at least protect + 2 entries to have anything outside the tail.
         if total < protect + 2:
             return None
 
-        compactable_limit = total - protect  # exclusive upper bound
+        compactable_limit = total - protect
 
-        # Find where the leading summaries/pinned entries end (first compactable raw entry).
         start = 0
         while start < compactable_limit and (
             self.active[start].kind == "summary"
@@ -255,21 +231,15 @@ class LcmEngine:
             start += 1
 
         if start >= compactable_limit:
-            # Everything compactable is already summarised or pinned.
             return None
 
-        # The block runs from start up to the first pinned entry or compactable_limit.
         end = start
         while end < compactable_limit and self.active[end].msg_id not in self._pinned_ids:
             end += 1
 
-        # Integrity: the block must contain at least one entry.
         if end - start < 1:
             return None
 
-        # Adjust end so we never orphan a tool-result from its tool-call.
-        # Walk backwards from end-1; if that entry is a tool result, pull end
-        # back until the last included entry is not a tool result.
         end = self._retreat_from_tool_result(start, end)
         if end is None or end - start < 1:
             return None
@@ -287,14 +257,10 @@ class LcmEngine:
         while end > start:
             last_entry = self.active[end - 1]
             if last_entry.message.get("role") == "tool":
-                # This tool result's tool_call must also be in the block.
-                # The tool_call is the entry immediately before it.
                 if end - 1 > start:
                     preceding = self.active[end - 2]
                     if preceding.message.get("tool_calls"):
-                        # Pair is intact — fine.
                         break
-                # Pair would be split; retreat past the tool result.
                 end -= 1
             else:
                 break
@@ -319,29 +285,30 @@ class LcmEngine:
         This is the low-level compact method. Use compact_block() for
         automatic summarization.
         """
-        block = self.active[block_start:block_end]
-        source_ids: list[MessageId] = [
-            e.msg_id for e in block if e.msg_id is not None
-        ]
+        with self._compact_lock:
+            block = self.active[block_start:block_end]
+            source_ids: list[MessageId] = [
+                e.msg_id for e in block if e.msg_id is not None
+            ]
 
-        tokens = self.token_estimator.estimate([e.message for e in block])
-        node = self.dag.create_node(
-            source_ids=source_ids,
-            text=summary_text,
-            level=level,
-            tokens=tokens,
-        )
+            tokens = self.token_estimator.estimate([e.message for e in block])
+            node = self.dag.create_node(
+                source_ids=source_ids,
+                text=summary_text,
+                level=level,
+                tokens=tokens,
+            )
 
-        summary_message: dict[str, Any] = {
-            "role": "user",
-            "content": f"[Summary of {len(source_ids)} messages]\n{summary_text}",
-            "_lcm_summary": True,
-            "_lcm_node_id": node.id,
-        }
-        summary_entry = ContextEntry.summary(node.id, summary_message)
+            summary_message: dict[str, Any] = {
+                "role": "user",
+                "content": f"[Summary of {len(source_ids)} messages]\n{summary_text}",
+                "_lcm_summary": True,
+                "_lcm_node_id": node.id,
+            }
+            summary_entry = ContextEntry.summary(node.id, summary_message)
 
-        self.active[block_start:block_end] = [summary_entry]
-        self._async_compaction_pending = False
+            self.active[block_start:block_end] = [summary_entry]
+            self._async_compaction_pending = False
 
         logger.info(
             "LCM: Compacted %d messages into summary node %d (~%d tokens saved)",
@@ -365,7 +332,6 @@ class LcmEngine:
         block = self.active[start:end]
         block_messages = [e.message for e in block]
 
-        # Generate summary
         summary = self.summarizer.summarize(
             block_messages,
             previous_summary=self._last_summary,
@@ -375,10 +341,8 @@ class LcmEngine:
             logger.warning("LCM: Summarization failed, block not compacted")
             return None
 
-        # Store summary for iterative updates
         self._last_summary = summary
 
-        # Perform compaction
         return self.compact(summary, level=1, block_start=start, block_end=end)
 
     def auto_compact(self) -> SummaryNode | None:
@@ -394,6 +358,43 @@ class LcmEngine:
         if block is None:
             return None
         return self.compact_block(block[0], block[1])
+
+    def async_compact(self, callback=None) -> "threading.Thread | None":
+        """Run compaction in a background thread.
+
+        If a compaction is already in progress (``_async_compaction_pending``
+        is True), this method returns ``None`` immediately without launching
+        a second thread.
+
+        Args:
+            callback: Optional callable(SummaryNode | None).  Called with the
+                      result when the background thread finishes.  Receives
+                      ``None`` if compaction raised an exception.
+
+        Returns:
+            The ``threading.Thread`` that was started, or ``None`` if the call
+            was skipped because a compaction was already pending.
+        """
+        with self._compact_lock:
+            if self._async_compaction_pending:
+                return None
+            self._async_compaction_pending = True
+
+        def _worker() -> None:
+            try:
+                result = self.auto_compact()
+                if callback is not None:
+                    callback(result)
+            except Exception as exc:
+                logger.error("Async compaction failed: %s", exc)
+                if callback is not None:
+                    callback(None)
+            finally:
+                self._async_compaction_pending = False
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        return thread
 
     # ------------------------------------------------------------------
     # Expansion
@@ -415,7 +416,6 @@ class LcmEngine:
         for mid in all_ids:
             msg = self.store.get(mid)
             if msg is None:
-                # Either out-of-range or pruned — return a placeholder
                 placeholder: dict[str, Any] = {
                     "role": "user",
                     "content": "[Message pruned from store]",
@@ -431,7 +431,6 @@ class LcmEngine:
 
         Returns True if successful, False if node not found.
         """
-        # Find the summary entry
         summary_index: int | None = None
         for i, entry in enumerate(self.active):
             if entry.kind == "summary" and entry.node_id == node_id:
@@ -441,20 +440,16 @@ class LcmEngine:
         if summary_index is None:
             return False
 
-        # Get source messages
         pairs = self.expand_summary(node_id)
         if not pairs:
             return False
 
-        # Create raw entries
         expanded_entries = [
             ContextEntry.raw(mid, msg) for mid, msg in pairs
         ]
 
-        # Replace summary with expanded entries
         self.active[summary_index:summary_index + 1] = expanded_entries
 
-        # Reset async flag since context grew
         self._async_compaction_pending = False
 
         logger.info(
@@ -463,52 +458,6 @@ class LcmEngine:
         )
 
         return True
-
-    # ------------------------------------------------------------------
-    # Search
-    # ------------------------------------------------------------------
-
-    def search(self, query: str, limit: int = 10) -> list[tuple[int, dict[str, Any]]]:
-        """Search messages in the store.
-
-        Uses semantic search if available, otherwise falls back to keyword search.
-
-        Returns list of (msg_id, message) tuples.
-        """
-        # Try semantic search first
-        if self.semantic_index.is_available() and self.config.semantic_search:
-            ids = self.semantic_index.search(query, k=limit)
-            if ids:
-                return self.store.get_many(ids)
-
-        # Fallback: keyword search
-        return self._keyword_search(query, limit)
-
-    def _keyword_search(self, query: str, limit: int) -> list[tuple[int, dict[str, Any]]]:
-        """Fallback keyword search."""
-        query_lower = query.lower()
-        results: list[tuple[int, dict[str, Any]]] = []
-
-        for msg_id in range(len(self.store)):
-            msg = self.store.get(msg_id)
-            if msg is None:
-                continue
-            content = str(msg.get("content", "") or "")
-            if query_lower in content.lower():
-                results.append((msg_id, msg))
-                if len(results) >= limit:
-                    break
-
-        return results
-
-    def build_semantic_index(self) -> bool:
-        """Build the semantic index for the store.
-
-        Returns True if indexing succeeded.
-        """
-        if not self.semantic_index.is_available():
-            return False
-        return self.semantic_index.index(self.store)
 
     # ------------------------------------------------------------------
     # Pinning
@@ -521,7 +470,6 @@ class LcmEngine:
         """
         new_ids = set(msg_ids) - self._pinned_ids
 
-        # Check limit
         if len(self._pinned_ids) + len(new_ids) > self.config.max_pinned:
             remaining = self.config.max_pinned - len(self._pinned_ids)
             new_ids = set(list(new_ids)[:remaining])
@@ -541,173 +489,3 @@ class LcmEngine:
     def get_pinned(self) -> list[int]:
         """Return sorted list of pinned message IDs."""
         return sorted(self._pinned_ids)
-
-    # ------------------------------------------------------------------
-    # Rebuild
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def rebuild_from_session(
-        cls,
-        session_data: dict,
-        config: LcmConfig,
-        model: str = "",
-        provider: str = "",
-        context_length: int = 128_000,
-    ) -> "LcmEngine":
-        """Reconstruct engine state from persisted session data.
-
-        Two modes:
-        - With ``lcm.original_messages``: the full store backup is restored
-          first; raw entries in the active list reference those store positions.
-        - Without it (legacy or no prior compaction): each raw message in the
-          active list is appended to the store directly.
-        """
-        engine = cls(config, model, provider, context_length)
-        messages = session_data.get("messages", [])
-        lcm_meta = session_data.get("lcm", {})
-        summaries = lcm_meta.get("summaries", [])
-        original_messages = lcm_meta.get("original_messages", [])
-
-        # Rebuild immutable store from original_messages when available.
-        for msg in original_messages:
-            engine.store.append(msg)
-
-        # Rebuild DAG — must insert nodes in node_id order so the auto-assigned
-        # ids from create_node match the stored node_id values.
-        for s in sorted(summaries, key=lambda x: x.get("node_id", 0)):
-            engine.dag.create_node(
-                source_ids=s.get("source_ids", []),
-                text=s.get("text", ""),
-                level=s.get("level", 1),
-                tokens=s.get("tokens", 0),
-                children=s.get("child_summaries", []),
-            )
-
-        # Determine the store index for the first raw entry in the active list.
-        # When original_messages is present the raw entries are the tail of the
-        # store, so the first raw entry's id = len(store) - count_raw_in_active.
-        if original_messages:
-            raw_in_active = sum(1 for m in messages if not m.get("_lcm_summary"))
-            next_raw_id = len(engine.store) - raw_in_active
-        else:
-            next_raw_id = 0  # will be assigned by store.append below
-
-        for msg in messages:
-            if msg.get("_lcm_summary"):
-                node_id = msg.get("_lcm_node_id", 0)
-                engine.active.append(ContextEntry.summary(node_id, msg))
-            else:
-                if original_messages:
-                    msg_id = next_raw_id
-                    next_raw_id += 1
-                else:
-                    msg_id = engine.store.append(msg)
-                engine.active.append(ContextEntry.raw(msg_id, msg))
-
-        # Restore pinned IDs from metadata
-        pinned_ids = lcm_meta.get("pinned", [])
-        # Validate: only keep IDs that exist in store
-        valid_pins = {pid for pid in pinned_ids if pid < len(engine.store)}
-        engine._pinned_ids = valid_pins
-
-        # Restore last summary if available
-        engine._last_summary = lcm_meta.get("last_summary")
-
-        logger.info(
-            "LCM: Rebuilt from session: %d messages, %d summaries, %d pinned",
-            len(engine.active), len(engine.dag.nodes), len(engine._pinned_ids),
-        )
-
-        return engine
-
-    def to_session_metadata(self) -> dict:
-        """Serialize engine state for session JSON persistence."""
-        summaries = []
-        for node in self.dag.nodes:
-            summaries.append({
-                "node_id": node.id,
-                "source_ids": node.source_ids,
-                "child_summaries": node.child_summaries,
-                "text": node.text,
-                "level": node.level,
-                "tokens": node.tokens,
-            })
-
-        original_messages = []
-        for i in range(len(self.store)):
-            msg = self.store.get(i)
-            if msg is not None:
-                original_messages.append(msg)
-
-        return {
-            "summaries": summaries,
-            "original_messages": original_messages,
-            "store_size": len(self.store),
-            "pinned": sorted(self._pinned_ids),
-            "last_summary": self._last_summary,
-        }
-
-    # ------------------------------------------------------------------
-    # Formatting
-    # ------------------------------------------------------------------
-
-    def format_expanded(self, msg_ids: list[MessageId]) -> str:
-        """Format expanded messages as '[msg N] role: content' lines."""
-        pairs = self.expand(msg_ids)
-        lines: list[str] = []
-        for mid, msg in pairs:
-            role = msg.get("role", "unknown")
-            content = str(msg.get("content", "") or "")
-            lines.append(f"[msg {mid}] {role}: {content}")
-        return "\n".join(lines)
-
-    def format_toc(self) -> str:
-        """Format a table of contents of the active context."""
-        if not self.active:
-            return "Active context is empty."
-
-        lines = ["Conversation Timeline:"]
-        for i, entry in enumerate(self.active):
-            if entry.kind == "raw":
-                role = entry.message.get("role", "?")
-                content = str(entry.message.get("content", "") or "")
-                snippet = content[:60].replace("\n", " ")
-                lines.append(f"  [{i}] msg {entry.msg_id} ({role}): {snippet}")
-            else:
-                content = str(entry.message.get("content", "") or "")
-                snippet = content[:60].replace("\n", " ")
-                lines.append(f"  [{i}] summary node={entry.node_id}: {snippet}")
-
-        return "\n".join(lines)
-
-    def format_budget(self) -> str:
-        """Format a token budget summary."""
-        breakdown = self.active_token_breakdown()
-
-        lines = [
-            "LCM Context Budget:",
-            f"  Active entries : {len(self.active)} ({breakdown['raw_count']} raw, {breakdown['summary_count']} summaries)",
-            f"  Active tokens  : ~{breakdown['total']}",
-            f"  Raw tokens     : ~{breakdown['raw']}",
-            f"  Summary tokens : ~{breakdown['summary']}",
-            f"  Store total    : {len(self.store)} messages (immutable)",
-            f"  Context limit  : {self.context_length:,} tokens",
-            f"  Pinned IDs     : {self.get_pinned() or 'none'}",
-        ]
-        return "\n".join(lines)
-
-    # ------------------------------------------------------------------
-    # Reset
-    # ------------------------------------------------------------------
-
-    def reset(self):
-        """Reset engine state for a new session."""
-        self.store = ImmutableStore()
-        self.dag = SummaryDag()
-        self.active = []
-        self._async_compaction_pending = False
-        self._pinned_ids = set()
-        self._last_summary = None
-        self.summarizer.reset()
-        self.semantic_index.clear()

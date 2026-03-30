@@ -1,12 +1,9 @@
 """Tests for DAM state persistence."""
 import pytest
 import numpy as np
-from pathlib import Path
-import sys
 
-sys.path.insert(0, str(Path.home() / ".hermes/plugins/hermes-dam"))
-from network import DenseAssociativeMemory
-from persistence import save_state, load_state
+from agent.lcm.dam.network import DenseAssociativeMemory
+from agent.lcm.dam.persistence import save_state, load_state
 
 
 class MockRetriever:

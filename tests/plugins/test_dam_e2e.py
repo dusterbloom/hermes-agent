@@ -3,72 +3,13 @@
 Exercises the full pipeline: messages -> LcmEngine -> DAMRetriever ->
 indexing -> search/recall/compose -> persistence -> reload -> verify.
 """
-import importlib
-import importlib.util
-import types
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-# ---------------------------------------------------------------------------
-# Module loading helpers (reuse pattern from test_dam_retrieval.py)
-# ---------------------------------------------------------------------------
-
-_DAM_DIR = Path.home() / ".hermes/plugins/hermes-dam"
-
-if str(_DAM_DIR) not in sys.path:
-    sys.path.insert(0, str(_DAM_DIR))
-
-from network import DenseAssociativeMemory
-from encoder import MessageEncoder
-from persistence import save_state, load_state
-
-
-def _load_retrieval_module():
-    """Load retrieval.py under a fake package so relative imports resolve."""
-    _NS = "hermes_plugins"
-    _PKG = f"{_NS}.hermes_dam"
-
-    if _NS not in sys.modules:
-        ns_pkg = types.ModuleType(_NS)
-        ns_pkg.__path__ = []
-        ns_pkg.__package__ = _NS
-        sys.modules[_NS] = ns_pkg
-
-    if _PKG not in sys.modules:
-        pkg = types.ModuleType(_PKG)
-        pkg.__path__ = [str(_DAM_DIR)]
-        pkg.__package__ = _PKG
-        sys.modules[_PKG] = pkg
-        for sibling in ("network", "encoder", "persistence"):
-            sibling_fqn = f"{_PKG}.{sibling}"
-            if sibling_fqn not in sys.modules:
-                spec = importlib.util.spec_from_file_location(
-                    sibling_fqn,
-                    _DAM_DIR / f"{sibling}.py",
-                    submodule_search_locations=[],
-                )
-                mod = importlib.util.module_from_spec(spec)
-                mod.__package__ = _PKG
-                sys.modules[sibling_fqn] = mod
-                spec.loader.exec_module(mod)
-
-    fqn = f"{_PKG}.retrieval"
-    if fqn in sys.modules:
-        return sys.modules[fqn]
-    spec = importlib.util.spec_from_file_location(fqn, _DAM_DIR / "retrieval.py")
-    mod = importlib.util.module_from_spec(spec)
-    mod.__package__ = _PKG
-    sys.modules[fqn] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_retrieval_mod = _load_retrieval_module()
-DAMRetriever = _retrieval_mod.DAMRetriever
-
+from agent.lcm.dam.network import DenseAssociativeMemory
+from agent.lcm.dam.encoder import MessageEncoder
+from agent.lcm.dam.retrieval import DAMRetriever
+from agent.lcm.dam.persistence import save_state, load_state
 from agent.lcm.engine import LcmEngine
 from agent.lcm.config import LcmConfig
 from agent.lcm.tools import set_engine, get_engine

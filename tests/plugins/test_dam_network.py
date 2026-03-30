@@ -1,12 +1,8 @@
 """Tests for Dense Associative Memory network."""
 import pytest
 import numpy as np
-from pathlib import Path
-import sys
 
-# Add plugin to path
-sys.path.insert(0, str(Path.home() / ".hermes/plugins/hermes-dam"))
-from network import DenseAssociativeMemory
+from agent.lcm.dam.network import DenseAssociativeMemory
 
 
 class TestInitialization:
