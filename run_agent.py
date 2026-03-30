@@ -87,7 +87,8 @@ from agent.model_metadata import (
     get_next_probe_tier, parse_context_limit_from_error,
     save_context_length, is_local_endpoint,
 )
-from agent.context_compressor import ContextCompressor
+from agent.lcm.config import LcmConfig
+from agent.lcm.engine import LcmEngine, CompactionAction
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
@@ -641,7 +642,9 @@ class AIAgent:
         # Context pressure warnings: notify the USER (not the LLM) as context
         # fills up.  Purely informational — displayed in CLI output and sent via
         # status_callback for gateway platforms.  Does NOT inject into messages.
-        self._context_pressure_warned = False
+        self._context_50_warned = False
+        self._context_70_warned = False
+        self._user_turn_count = 0
 
         # Persistent error log -- always writes WARNING+ to ~/.hermes/logs/errors.log
         # so tool failures, API errors, etc. are inspectable after the fact.
@@ -1158,21 +1161,48 @@ class AIAgent:
                                         pass
                         break
         
-        self.context_compressor = ContextCompressor(
+        # Initialize LCM engine (Latent Context Management)
+        # This is now the unified context management system, always enabled.
+        _lcm_cfg = _agent_cfg.get("lcm", {})
+        if not isinstance(_lcm_cfg, dict):
+            _lcm_cfg = {}
+        _lcm_config = LcmConfig.from_dict(_lcm_cfg)
+        
+        self.lcm_engine: LcmEngine = LcmEngine(
+            config=_lcm_config,
             model=self.model,
-            threshold_percent=compression_threshold,
-            protect_first_n=3,
-            protect_last_n=compression_protect_last,
-            summary_target_ratio=compression_target_ratio,
-            summary_model_override=compression_summary_model,
-            quiet_mode=self.quiet_mode,
-            base_url=self.base_url,
-            api_key=getattr(self, "api_key", ""),
-            config_context_length=_config_context_length,
             provider=self.provider,
+            context_length=_config_context_length or 128_000,
         )
-        self.compression_enabled = compression_enabled
-        self._user_turn_count = 0
+        
+        # If compression is disabled, set tau thresholds to effectively disable auto-compaction
+        if not compression_enabled:
+            self.lcm_engine.config.tau_soft = 2.0  # Never triggers
+            self.lcm_engine.config.tau_hard = 2.0  # Never triggers
+        
+        logger.info(
+            "LCM initialized (tau_soft=%.2f, tau_hard=%.2f, protect_last_n=%d, context_length=%d)",
+            self.lcm_engine.config.tau_soft,
+            self.lcm_engine.config.tau_hard,
+            self.lcm_engine.config.protect_last_n,
+            self.lcm_engine.context_length,
+        )
+        
+        # Context probing flag - set when we step down from a context error
+        self._context_probed = False
+        
+        # Register LCM tools into the active tool surface
+        from agent.lcm.tools import set_engine as _lcm_set_engine, LCM_TOOL_SCHEMAS
+        _lcm_set_engine(self.lcm_engine)
+        _lcm_tool_defs = [
+            {"type": "function", "function": schema}
+            for schema in LCM_TOOL_SCHEMAS.values()
+        ]
+        if self.tools is None:
+            self.tools = _lcm_tool_defs
+        else:
+            self.tools = list(self.tools) + _lcm_tool_defs
+        self.valid_tool_names.update(LCM_TOOL_SCHEMAS.keys())
 
         # Cumulative token usage for the session
         self.session_prompt_tokens = 0
@@ -1189,10 +1219,11 @@ class AIAgent:
         self.session_cost_source = "none"
         
         if not self.quiet_mode:
+            _threshold_tokens = int(self.lcm_engine.context_length * compression_threshold)
             if compression_enabled:
-                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
+                print(f"📊 Context limit: {self.lcm_engine.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {_threshold_tokens:,})")
             else:
-                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
+                print(f"📊 Context limit: {self.lcm_engine.context_length:,} tokens (auto-compression disabled)")
 
         # Snapshot primary runtime for per-turn restoration.  When fallback
         # activates during a turn, the next turn restores these values so the
@@ -1254,19 +1285,9 @@ class AIAgent:
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
         
-        # Turn counter (added after reset_session_state was first written — #2635)
-        self._user_turn_count = 0
-
-        # Context compressor internal counters (if present)
-        if hasattr(self, "context_compressor") and self.context_compressor:
-            self.context_compressor.last_prompt_tokens = 0
-            self.context_compressor.last_completion_tokens = 0
-            self.context_compressor.last_total_tokens = 0
-            self.context_compressor.compression_count = 0
-            self.context_compressor._context_probed = False
-            self.context_compressor._context_probe_persistable = False
-            # Iterative summary from previous session must not bleed into new one (#2635)
-            self.context_compressor._previous_summary = None
+        # LCM engine reset
+        if hasattr(self, "lcm_engine") and self.lcm_engine:
+            self.lcm_engine.reset()
     
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
@@ -5464,8 +5485,26 @@ class AIAgent:
             if messages and messages[-1].get("_flush_sentinel") == _sentinel:
                 messages.pop()
 
+    def _append_message(self, messages: list, msg: dict) -> None:
+        """Append a message to the list and ingest into LCM."""
+        messages.append(msg)
+        self.lcm_engine.ingest(msg)
+
+    def _lcm_compact(self, messages: list, system_message: str) -> tuple[list, str]:
+        """Run LCM compaction: find block, summarize, replace active context.
+
+        Returns:
+            (new_messages, active_system_prompt) tuple
+        """
+        node = self.lcm_engine.auto_compact()
+        if node is None:
+            return messages, self._cached_system_prompt or ""
+
+        new_messages = self.lcm_engine.active_messages()
+        return new_messages, self._cached_system_prompt or ""
+
     def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default") -> tuple:
-        """Compress conversation context and split the session in SQLite.
+        """Compress conversation context using LCM.
 
         Returns:
             (compressed_messages, new_system_prompt) tuple
@@ -5480,7 +5519,13 @@ class AIAgent:
             except Exception:
                 pass
 
-        compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+        # Use LCM for compression
+        node = self.lcm_engine.auto_compact()
+        compressed = self.lcm_engine.active_messages()
+
+        # If compression didn't reduce messages, return original
+        if len(compressed) >= len(messages):
+            compressed = messages
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
@@ -5636,6 +5681,21 @@ class AIAgent:
                 max_iterations=function_args.get("max_iterations"),
                 parent_agent=self,
             )
+        elif function_name in ("lcm_expand", "lcm_pin", "lcm_forget", "lcm_search", "lcm_budget", "lcm_toc", "lcm_focus"):
+            from agent.lcm.tools import (
+                handle_lcm_expand, handle_lcm_pin, handle_lcm_forget,
+                handle_lcm_search, handle_lcm_budget, handle_lcm_toc, handle_lcm_focus,
+            )
+            _lcm_dispatch = {
+                "lcm_expand": handle_lcm_expand,
+                "lcm_pin": handle_lcm_pin,
+                "lcm_forget": handle_lcm_forget,
+                "lcm_search": handle_lcm_search,
+                "lcm_budget": handle_lcm_budget,
+                "lcm_toc": handle_lcm_toc,
+                "lcm_focus": handle_lcm_focus,
+            }
+            return _lcm_dispatch[function_name](function_args)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -6033,6 +6093,24 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self.quiet_mode:
                         self._vprint(f"  {cute_msg}")
+            elif function_name in ("lcm_expand", "lcm_pin", "lcm_forget", "lcm_search", "lcm_budget", "lcm_toc", "lcm_focus"):
+                from agent.lcm.tools import (
+                    handle_lcm_expand, handle_lcm_pin, handle_lcm_forget,
+                    handle_lcm_search, handle_lcm_budget, handle_lcm_toc, handle_lcm_focus,
+                )
+                _lcm_dispatch = {
+                    "lcm_expand": handle_lcm_expand,
+                    "lcm_pin": handle_lcm_pin,
+                    "lcm_forget": handle_lcm_forget,
+                    "lcm_search": handle_lcm_search,
+                    "lcm_budget": handle_lcm_budget,
+                    "lcm_toc": handle_lcm_toc,
+                    "lcm_focus": handle_lcm_focus,
+                }
+                function_result = _lcm_dispatch[function_name](function_args)
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
             elif self.quiet_mode:
                 spinner = None
                 if not self.tool_progress_callback:
@@ -6178,12 +6256,11 @@ class AIAgent:
             )
         return None
 
-    def _emit_context_pressure(self, compaction_progress: float, compressor) -> None:
+    def _emit_context_pressure(self, compaction_progress: float) -> None:
         """Notify the user that context is approaching the compaction threshold.
 
         Args:
             compaction_progress: How close to compaction (0.0–1.0, where 1.0 = fires).
-            compressor: The ContextCompressor instance (for threshold/context info).
 
         Purely user-facing — does NOT modify the message stream.
         For CLI: prints a formatted line with a progress bar.
@@ -6191,7 +6268,9 @@ class AIAgent:
         """
         from agent.display import format_context_pressure, format_context_pressure_gateway
 
-        threshold_pct = compressor.threshold_tokens / compressor.context_length if compressor.context_length else 0.5
+        context_length = self.lcm_engine.context_length
+        threshold_pct = self.lcm_engine.config.tau_soft
+        threshold_tokens = int(context_length * threshold_pct)
 
         # CLI output — always shown (these are user-facing status notifications,
         # not verbose debug output, so they bypass quiet_mode).
@@ -6199,9 +6278,9 @@ class AIAgent:
         if self.platform in (None, "cli"):
             line = format_context_pressure(
                 compaction_progress=compaction_progress,
-                threshold_tokens=compressor.threshold_tokens,
+                threshold_tokens=threshold_tokens,
                 threshold_percent=threshold_pct,
-                compression_enabled=self.compression_enabled,
+                compression_enabled=self.lcm_engine.config.tau_soft < 1.0,
             )
             self._safe_print(line)
 
@@ -6211,7 +6290,7 @@ class AIAgent:
                 msg = format_context_pressure_gateway(
                     compaction_progress=compaction_progress,
                     threshold_percent=threshold_pct,
-                    compression_enabled=self.compression_enabled,
+                    compression_enabled=self.lcm_engine.config.tau_soft < 1.0,
                 )
                 self.status_callback("context_pressure", msg)
             except Exception:
@@ -6557,10 +6636,10 @@ class AIAgent:
         # while having a large existing session — compress proactively rather
         # than waiting for an API error (which might be caught as a non-retryable
         # 4xx and abort the request entirely).
+        threshold_tokens = int(self.lcm_engine.context_length * self.lcm_engine.config.tau_soft)
         if (
-            self.compression_enabled
-            and len(messages) > self.context_compressor.protect_first_n
-                                + self.context_compressor.protect_last_n + 1
+            self.lcm_engine.config.tau_soft < 1.0  # Compression enabled
+            and len(messages) > self.lcm_engine.config.protect_last_n + 2
         ):
             # Include tool schema tokens — with many tools these can add
             # 20-30K+ tokens that the old sys+msg estimate missed entirely.
@@ -6570,18 +6649,18 @@ class AIAgent:
                 tools=self.tools or None,
             )
 
-            if _preflight_tokens >= self.context_compressor.threshold_tokens:
+            if _preflight_tokens >= threshold_tokens:
                 logger.info(
                     "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
                     f"{_preflight_tokens:,}",
-                    f"{self.context_compressor.threshold_tokens:,}",
+                    f"{threshold_tokens:,}",
                     self.model,
-                    f"{self.context_compressor.context_length:,}",
+                    f"{self.lcm_engine.context_length:,}",
                 )
                 if not self.quiet_mode:
                     self._safe_print(
                         f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                        f">= {self.context_compressor.threshold_tokens:,} threshold"
+                        f">= {threshold_tokens:,} threshold"
                     )
                 # May need multiple passes for very large sessions with small
                 # context windows (each pass summarises the middle N turns).
@@ -6605,7 +6684,7 @@ class AIAgent:
                         system_prompt=active_system_prompt or "",
                         tools=self.tools or None,
                     )
-                    if _preflight_tokens < self.context_compressor.threshold_tokens:
+                    if _preflight_tokens < threshold_tokens:
                         break  # Under threshold
 
         # Plugin hook: pre_llm_call
@@ -6778,7 +6857,7 @@ class AIAgent:
 
             # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
-            # gated on context_compressor — so orphans from session loading or
+            # gated on any flag — so orphans from session loading or
             # manual message manipulation are always caught.
             api_messages = self._sanitize_api_messages(api_messages)
 
@@ -7177,18 +7256,13 @@ class AIAgent:
                             "completion_tokens": completion_tokens,
                             "total_tokens": total_tokens,
                         }
-                        self.context_compressor.update_from_response(usage_dict)
-
-                        # Cache discovered context length after successful call.
-                        # Only persist limits confirmed by the provider (parsed
-                        # from the error message), not guessed probe tiers.
-                        if self.context_compressor._context_probed:
-                            ctx = self.context_compressor.context_length
-                            if getattr(self.context_compressor, "_context_probe_persistable", False):
-                                save_context_length(self.model, self.base_url, ctx)
-                                self._safe_print(f"{self.log_prefix}💾 Cached context length: {ctx:,} tokens for {self.model}")
-                            self.context_compressor._context_probed = False
-                            self.context_compressor._context_probe_persistable = False
+                        # Context probing: if we stepped down from a context error,
+                        # cache the discovered context length on success
+                        if hasattr(self, '_context_probed') and self._context_probed:
+                            ctx = self.lcm_engine.context_length
+                            save_context_length(self.model, self.base_url, ctx)
+                            self._safe_print(f"{self.log_prefix}💾 Cached context length: {ctx:,} tokens for {self.model}")
+                            self._context_probed = False
 
                         self.session_prompt_tokens += prompt_tokens
                         self.session_completion_tokens += completion_tokens
@@ -7553,7 +7627,7 @@ class AIAgent:
                     # each failed message gets persisted, making the session even
                     # larger. (#1630)
                     if not is_context_length_error and status_code == 400:
-                        ctx_len = getattr(getattr(self, 'context_compressor', None), 'context_length', 200000)
+                        ctx_len = self.lcm_engine.context_length
                         is_large_session = approx_tokens > ctx_len * 0.4 or len(api_messages) > 80
                         is_generic_error = len(error_msg.strip()) < 30  # e.g. just "error"
                         if is_large_session and is_generic_error:
@@ -7592,8 +7666,7 @@ class AIAgent:
                                 )
 
                     if is_context_length_error:
-                        compressor = self.context_compressor
-                        old_ctx = compressor.context_length
+                        old_ctx = self.lcm_engine.context_length
 
                         # Try to parse the actual limit from the error message
                         parsed_limit = parse_context_limit_from_error(error_msg)
@@ -7605,17 +7678,8 @@ class AIAgent:
                             new_ctx = get_next_probe_tier(old_ctx)
 
                         if new_ctx and new_ctx < old_ctx:
-                            compressor.context_length = new_ctx
-                            compressor.threshold_tokens = int(new_ctx * compressor.threshold_percent)
-                            compressor._context_probed = True
-                            # Only persist limits parsed from the provider's
-                            # error message (a real number).  Guessed fallback
-                            # tiers from get_next_probe_tier() should stay
-                            # in-memory only — persisting them pollutes the
-                            # cache with wrong values.
-                            compressor._context_probe_persistable = bool(
-                                parsed_limit and parsed_limit == new_ctx
-                            )
+                            self.lcm_engine.context_length = new_ctx
+                            self._context_probed = True
                             self._vprint(f"{self.log_prefix}⚠️  Context length exceeded — stepping down: {old_ctx:,} → {new_ctx:,} tokens", force=True)
                         else:
                             self._vprint(f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...", force=True)
@@ -8221,16 +8285,6 @@ class AIAgent:
                     # compression.  prompt_tokens + completion_tokens is the
                     # actual context size the provider reported plus the
                     # assistant turn — a tight lower bound for the next prompt.
-                    # Tool results appended above aren't counted yet, but the
-                    # threshold (default 50%) leaves ample headroom; if tool
-                    # results push past it, the next API call will report the
-                    # real total and trigger compression then.
-                    #
-                    # If last_prompt_tokens is 0 (stale after API disconnect
-                    # or provider returned no usage data), fall back to rough
-                    # estimate to avoid missing compression.  Without this,
-                    # a session can grow unbounded after disconnects because
-                    # should_compress(0) never fires.  (#2153)
                     _compressor = self.context_compressor
                     if _compressor.last_prompt_tokens > 0:
                         _real_tokens = (
@@ -8240,29 +8294,33 @@ class AIAgent:
                     else:
                         _real_tokens = estimate_messages_tokens_rough(messages)
 
+                    # Estimate next prompt size from the LCM engine's active
+                    # token count (already includes all ingested messages).
+                    _estimated_next_prompt = self.lcm_engine.active_tokens()
+
                     # ── Context pressure warnings (user-facing only) ──────────
                     # Notify the user (NOT the LLM) as context approaches the
                     # compaction threshold.  Thresholds are relative to where
                     # compaction fires, not the raw context window.
                     # Does not inject into messages — just prints to CLI output
                     # and fires status_callback for gateway platforms.
-                    if _compressor.threshold_tokens > 0:
-                        _compaction_progress = _real_tokens / _compressor.threshold_tokens
-                        if _compaction_progress >= 0.85 and not self._context_pressure_warned:
-                            self._context_pressure_warned = True
-                            self._emit_context_pressure(_compaction_progress, _compressor)
+                    threshold_tokens = int(self.lcm_engine.context_length * self.lcm_engine.config.tau_soft)
+                    if threshold_tokens > 0:
+                        _compaction_progress = _estimated_next_prompt / threshold_tokens
+                        if _compaction_progress >= 0.85 and not self._context_70_warned:
+                            self._context_70_warned = True
+                            self._context_50_warned = True  # skip first tier if we jumped past it
+                            self._emit_context_pressure(_compaction_progress)
+                        elif _compaction_progress >= 0.60 and not self._context_50_warned:
+                            self._context_50_warned = True
+                            self._emit_context_pressure(_compaction_progress)
 
-                    if self.compression_enabled and _compressor.should_compress(_real_tokens):
-                        messages, active_system_prompt = self._compress_context(
-                            messages, system_message,
-                            approx_tokens=self.context_compressor.last_prompt_tokens,
-                            task_id=effective_task_id,
-                        )
-                        # Compression created a new session — clear history so
-                        # _flush_messages_to_session_db writes compressed messages
-                        # to the new session (see preflight compression comment).
-                        conversation_history = None
-                    
+                    # Check if LCM compression is needed
+                    _lcm_action = self.lcm_engine.check_thresholds()
+                    if _lcm_action != CompactionAction.NONE:
+                        messages, active_system_prompt = self._lcm_compact(messages, system_message)
+
+
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages
                     self._save_session_log(messages)
@@ -8603,7 +8661,7 @@ class AIAgent:
             "prompt_tokens": self.session_prompt_tokens,
             "completion_tokens": self.session_completion_tokens,
             "total_tokens": self.session_total_tokens,
-            "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
+            "last_prompt_tokens": self.lcm_engine.active_tokens(),
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,

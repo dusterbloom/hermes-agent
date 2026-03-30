@@ -523,6 +523,18 @@ DEFAULT_CONFIG = {
         "wrap_response": True,
     },
 
+    # Latent Context Management — probabilistic context compression.
+    # When enabled, the agent tracks token budget and compresses context when
+    # soft/hard thresholds are crossed.  All values are ratios of max_tokens.
+    "lcm": {
+        "enabled": True,
+        "tau_soft": 0.50,
+        "tau_hard": 0.85,
+        "deterministic_target": 512,
+        "protect_last_n": 4,
+        "summary_model": "",  # empty = use main configured model
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 11,
 }
