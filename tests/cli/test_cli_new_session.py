@@ -1,5 +1,4 @@
 """Regression tests for CLI fresh-session commands."""
-
 from __future__ import annotations
 
 import importlib
@@ -12,15 +11,20 @@ from hermes_state import SessionDB
 from tools.todo_tool import TodoStore
 
 
-class _FakeCompressor:
-    """Minimal stand-in for ContextCompressor."""
+class _FakeLCMEngine:
+    """Minimal stand-in for LcmEngine."""
 
     def __init__(self):
-        self.last_prompt_tokens = 500
-        self.last_completion_tokens = 200
-        self.last_total_tokens = 700
-        self.compression_count = 3
+        self.context_length = 128000
+        self._compression_count = 3
         self._context_probed = True
+
+    def active_tokens(self):
+        return 100
+
+    def reset(self):
+        self._compression_count = 0
+        self._context_probed = False
 
 
 class _FakeAgent:
@@ -38,18 +42,19 @@ class _FakeAgent:
 
         # Token counters (non-zero to verify reset)
         self.session_total_tokens = 1000
-        self.session_input_tokens = 600
-        self.session_output_tokens = 400
-        self.session_prompt_tokens = 550
-        self.session_completion_tokens = 350
+        self.session_input_tokens = 500
+        self.session_output_tokens = 500
+        self.session_prompt_tokens = 800
+        self.session_completion_tokens = 200
         self.session_cache_read_tokens = 100
         self.session_cache_write_tokens = 50
-        self.session_reasoning_tokens = 80
+        self.session_reasoning_tokens = 0
         self.session_api_calls = 5
         self.session_estimated_cost_usd = 0.42
         self.session_cost_status = "estimated"
         self.session_cost_source = "openrouter"
-        self.context_compressor = _FakeCompressor()
+        self.lcm_engine = _FakeLCMEngine()
+        self._context_probed = True
 
     def reset_session_state(self):
         """Mirror the real AIAgent.reset_session_state()."""
@@ -65,12 +70,9 @@ class _FakeAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        if hasattr(self, "context_compressor") and self.context_compressor:
-            self.context_compressor.last_prompt_tokens = 0
-            self.context_compressor.last_completion_tokens = 0
-            self.context_compressor.last_total_tokens = 0
-            self.context_compressor.compression_count = 0
-            self.context_compressor._context_probed = False
+        self._context_probed = False
+        if hasattr(self, "lcm_engine") and self.lcm_engine:
+            self.lcm_engine.reset()
 
 
 def _make_cli(env_overrides=None, config_overrides=None, **kwargs):
@@ -195,7 +197,7 @@ def test_new_session_resets_token_counters(tmp_path):
     agent = cli.agent
     assert agent.session_total_tokens > 0
     assert agent.session_api_calls > 0
-    assert agent.context_compressor.compression_count > 0
+    assert agent.lcm_engine._compression_count > 0
 
     cli.process_command("/new")
 
@@ -213,10 +215,8 @@ def test_new_session_resets_token_counters(tmp_path):
     assert agent.session_cost_status == "unknown"
     assert agent.session_cost_source == "none"
 
-    # Context compressor counters must also be zero
-    comp = agent.context_compressor
-    assert comp.last_prompt_tokens == 0
-    assert comp.last_completion_tokens == 0
-    assert comp.last_total_tokens == 0
-    assert comp.compression_count == 0
-    assert comp._context_probed is False
+    # LCM engine must be reset
+    lcm = agent.lcm_engine
+    assert lcm._compression_count == 0
+    assert lcm._context_probed is False
+    assert agent._context_probed is False

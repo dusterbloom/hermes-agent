@@ -1454,31 +1454,32 @@ class TestHandleMaxIterations:
         assert "reasoning" not in kwargs.get("extra_body", {})
 
 
+def _make_mock_lcm(*, tau_soft: float = 2.0, check_thresholds_return=None):
+    """Return a MagicMock LcmEngine suitable for run_conversation tests.
+
+    tau_soft >= 1.0 means auto-compaction never triggers (safe default for most
+    tests).  Pass check_thresholds_return to override what check_thresholds()
+    returns so tests that exercise the compression path can trigger it.
+    """
+    if check_thresholds_return is None:
+        check_thresholds_return = CompactionAction.NONE
+    lcm = MagicMock()
+    lcm.context_length = 128_000
+    lcm.config.tau_soft = tau_soft
+    lcm.config.tau_hard = 2.0
+    lcm.config.protect_last_n = 4
+    lcm.active_tokens.return_value = 0
+    lcm.check_thresholds.return_value = check_thresholds_return
+    lcm.active_messages.return_value = []
+    return lcm
+
+
 class TestRunConversation:
     """Tests for the main run_conversation method.
 
     Each test mocks client.chat.completions.create to return controlled
     responses, exercising different code paths without real API calls.
     """
-
-    @staticmethod
-    def _make_mock_lcm(*, tau_soft: float = 2.0, check_thresholds_return=None):
-        """Return a MagicMock lcm_engine suitable for run_conversation tests.
-
-        tau_soft >= 1.0 means auto-compaction never triggers (safe default).
-        Set check_thresholds_return to override what check_thresholds() returns.
-        """
-        if check_thresholds_return is None:
-            check_thresholds_return = CompactionAction.NONE
-        lcm = MagicMock()
-        lcm.context_length = 128_000
-        lcm.config.tau_soft = tau_soft
-        lcm.config.tau_hard = 2.0
-        lcm.config.protect_last_n = 4
-        lcm.active_tokens.return_value = 0
-        lcm.check_thresholds.return_value = check_thresholds_return
-        lcm.active_messages.return_value = []
-        return lcm
 
     def _setup_agent(self, agent):
         """Common setup for run_conversation tests."""
@@ -1487,7 +1488,7 @@ class TestRunConversation:
         agent.tool_delay = 0
         agent.compression_enabled = False
         agent.save_trajectories = False
-        agent.lcm_engine = self._make_mock_lcm()
+        agent.lcm_engine = _make_mock_lcm()
 
     def test_stop_finish_reason_returns_response(self, agent):
         self._setup_agent(agent)
@@ -1748,8 +1749,12 @@ class TestRunConversation:
         assert result["final_response"] == "Recovered after remint"
 
     def test_context_compression_triggered(self, agent):
-        """When LCM thresholds are hit, compaction runs."""
+        """When LCM check_thresholds fires, _lcm_compact is called and the conversation completes."""
         self._setup_agent(agent)
+        # Override the mock lcm_engine so check_thresholds signals compaction needed
+        agent.lcm_engine = _make_mock_lcm(
+            check_thresholds_return=CompactionAction.BLOCKING
+        )
 
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
         resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
@@ -1768,8 +1773,7 @@ class TestRunConversation:
                 "compressed system prompt",
             )
             result = agent.run_conversation("search something")
-        # LCM compaction may or may not fire depending on token counts;
-        # the key assertion is that the conversation completes successfully
+        mock_compact.assert_called_once()
         assert result["final_response"] == "All done"
         assert result["completed"] is True
 
@@ -1886,8 +1890,7 @@ class TestRetryExhaustion:
         agent.tool_delay = 0
         agent.compression_enabled = False
         agent.save_trajectories = False
-        # Disable LCM so tests use legacy compression path
-        agent.lcm_engine = None
+        agent.lcm_engine = _make_mock_lcm()
 
     @staticmethod
     def _make_fast_time_mock():
