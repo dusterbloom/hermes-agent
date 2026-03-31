@@ -118,6 +118,9 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
         except (ImportError, Exception):
             pass  # numpy not available or DAM init failed
 
+        # HRR persistent store for cross-session knowledge crystallization
+        self.hrr_store = None
+
         # Compaction effectiveness metrics
         self.metrics: dict = self._empty_metrics()
 
@@ -151,6 +154,22 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
             "last_compaction_time": None,
             "avg_compression_ratio": 0.0,
         }
+
+    def _crystallize_to_hrr(self, node) -> None:
+        """Store compaction summary as a persistent fact in the HRR store.
+
+        Failures are logged and silently swallowed to never block compaction.
+        """
+        if self.hrr_store is None:
+            return
+        try:
+            self.hrr_store.add_fact(
+                content=node.text,
+                category="compaction",
+                tags=f"level:{node.level},sources:{len(node.source_ids)}",
+            )
+        except Exception as exc:
+            logger.warning("HRR crystallization failed: %s", exc)
 
     def _record_compaction_metrics(
         self,
@@ -389,6 +408,7 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
             self._async_compaction_pending = False
 
         self._record_compaction_metrics(tokens, summary_text, level)
+        self._crystallize_to_hrr(node)
 
         logger.info(
             "LCM: Compacted %d messages into summary node %d (~%d tokens saved)",
