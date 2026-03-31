@@ -638,6 +638,8 @@ class TestBuildSystemPrompt:
             patch("run_agent.get_toolset_for_tool", create=True, side_effect=toolset_map.get),
             patch("run_agent.build_skills_system_prompt", return_value="SKILLS_PROMPT") as mock_skills,
             patch("run_agent.OpenAI"),
+            # Prevent LCM tools from polluting the controlled tool set
+            patch("agent.lcm.tools.LCM_TOOL_SCHEMAS", {}),
         ):
             agent = AIAgent(
                 api_key="test-k...7890",
