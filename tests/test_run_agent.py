@@ -640,6 +640,8 @@ class TestBuildSystemPrompt:
             patch("run_agent.OpenAI"),
             # Prevent LCM tools from polluting the controlled tool set
             patch("agent.lcm.tools.LCM_TOOL_SCHEMAS", {}),
+            # Prevent memory_* tools from polluting the controlled tool set
+            patch("agent.lcm.hrr.schemas.MEMORY_TOOL_SCHEMAS", {}),
         ):
             agent = AIAgent(
                 api_key="test-k...7890",
