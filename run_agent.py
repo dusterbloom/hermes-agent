@@ -1313,6 +1313,11 @@ class AIAgent:
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
         
+        # Conversation turn counter reset
+        self._user_turn_count = 0
+        if hasattr(self, 'context_compressor') and self.context_compressor is not None:
+            self.context_compressor._previous_summary = None
+
         # LCM engine reset
         if hasattr(self, "lcm_engine") and self.lcm_engine:
             self.lcm_engine.reset()
