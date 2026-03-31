@@ -1,12 +1,11 @@
 """Unified memory tools — auto-route across LCM, DAM, and HRR layers.
 
-Six tools replace 11 fragmented lcm_* / dam_* tools:
+Five tools replace 11 fragmented lcm_* / dam_* tools:
   memory_search  — unified search (DAM -> HRR -> keyword fallback)
   memory_pin     — pin in LCM + crystallize to HRR
   memory_expand  — expand summaries (session) or recall facts (cross-session)
   memory_forget  — compact in LCM + optionally lower HRR trust
   memory_reason  — HRR compositional query (probe/related/reason/contradict)
-  memory_budget  — token budget breakdown (delegates to lcm_budget)
 
 The old lcm_* and dam_* tools remain fully functional (backward compat).
 """
@@ -27,6 +26,15 @@ def _require_engine():
     if engine is None:
         raise RuntimeError("Memory system not initialized. No LCM engine registered.")
     return engine
+
+
+def _normalize_ids(raw) -> list[int]:
+    """Normalize message_ids from various input formats to list[int]."""
+    if isinstance(raw, int):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        return [int(i) for i in raw]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +67,7 @@ def handle_memory_search(args: dict[str, Any]) -> str:
                         f"[Session msg#{msg_id} score={score:.2f}] {role}: {snippet}"
                     )
         except Exception as exc:
-            logger.debug("DAM search failed, continuing: %s", exc)
+            logger.warning("DAM search failed, falling back: %s", exc)
 
     # Layer 2: HRR (cross-session persistent knowledge) — skip when source == "session"
     if source in ("auto", "memory") and engine.hrr_store is not None:
@@ -74,7 +82,7 @@ def handle_memory_search(args: dict[str, Any]) -> str:
                     f" {fact['content']}"
                 )
         except Exception as exc:
-            logger.debug("HRR search failed, continuing: %s", exc)
+            logger.warning("HRR search failed, falling back: %s", exc)
 
     # Layer 3: Keyword fallback (LCM store linear scan)
     if not results:
@@ -83,7 +91,7 @@ def handle_memory_search(args: dict[str, Any]) -> str:
 
             return handle_lcm_search({"query": query})
         except Exception as exc:
-            logger.debug("LCM keyword fallback failed: %s", exc)
+            logger.warning("LCM keyword fallback failed: %s", exc)
 
     if not results:
         return f"No results found for '{query}'."
@@ -99,14 +107,10 @@ def handle_memory_search(args: dict[str, Any]) -> str:
 def handle_memory_pin(args: dict[str, Any]) -> str:
     """Pin messages in LCM and crystallize them as persistent HRR facts."""
     engine = _require_engine()
-    message_ids = args.get("message_ids", [])
+    message_ids = _normalize_ids(args.get("message_ids", []))
     reason = str(args.get("reason", "")).strip()
 
-    # Normalise: accept both list[int] and comma-separated string (LCM compat)
-    if isinstance(message_ids, (list, tuple)):
-        ids_str = ",".join(str(i) for i in message_ids)
-    else:
-        ids_str = str(message_ids)
+    ids_str = ",".join(str(i) for i in message_ids)
 
     # Delegate to LCM pin
     from agent.lcm.tools import handle_lcm_pin
@@ -116,10 +120,9 @@ def handle_memory_pin(args: dict[str, Any]) -> str:
     # Auto-crystallize to HRR persistent store
     if engine.hrr_store is not None:
         crystallized = 0
-        for mid in (message_ids if isinstance(message_ids, (list, tuple)) else []):
+        for mid in message_ids:
             try:
-                mid_int = int(mid)
-                msg = engine.store.get(mid_int)
+                msg = engine.store.get(mid)
                 if msg and msg.get("content"):
                     engine.hrr_store.add_fact(
                         content=str(msg["content"]),
@@ -148,11 +151,13 @@ def handle_memory_expand(args: dict[str, Any]) -> str:
     source = args.get("source", "session")
 
     if source == "session":
-        # Delegate to LCM expand — convert list[int] to comma-separated string if needed
+        # Delegate to LCM expand — normalize list[int] to comma-separated string
         expand_args = dict(args)
-        message_ids = expand_args.get("message_ids")
-        if isinstance(message_ids, (list, tuple)):
-            expand_args["message_ids"] = ",".join(str(i) for i in message_ids)
+        raw_ids = expand_args.get("message_ids")
+        if raw_ids is not None:
+            expand_args["message_ids"] = ",".join(
+                str(i) for i in _normalize_ids(raw_ids)
+            )
         from agent.lcm.tools import handle_lcm_expand
 
         return handle_lcm_expand(expand_args)
@@ -192,13 +197,9 @@ def handle_memory_forget(args: dict[str, Any]) -> str:
     """Compact messages in LCM and optionally lower HRR trust for related facts."""
     engine = _require_engine()
     lower_trust = bool(args.get("lower_trust", False))
-    message_ids = args.get("message_ids", [])
+    message_ids = _normalize_ids(args.get("message_ids", []))
 
-    # Normalise to comma-separated string for LCM
-    if isinstance(message_ids, (list, tuple)):
-        ids_str = ",".join(str(i) for i in message_ids)
-    else:
-        ids_str = str(message_ids)
+    ids_str = ",".join(str(i) for i in message_ids)
 
     from agent.lcm.tools import handle_lcm_forget
 
@@ -208,15 +209,9 @@ def handle_memory_forget(args: dict[str, Any]) -> str:
 
     # Optionally lower HRR trust for related persistent facts
     if lower_trust and engine.hrr_store is not None:
-        ids_list = (
-            message_ids
-            if isinstance(message_ids, (list, tuple))
-            else [int(x.strip()) for x in str(message_ids).split(",") if x.strip()]
-        )
-        for mid in ids_list:
+        for mid in message_ids:
             try:
-                mid_int = int(mid)
-                msg = engine.store.get(mid_int)
+                msg = engine.store.get(mid)
                 if msg and msg.get("content"):
                     content_snippet = str(msg["content"])[:100]
                     matches = engine.hrr_store.search_facts(content_snippet, limit=3)
@@ -238,11 +233,11 @@ def handle_memory_forget(args: dict[str, Any]) -> str:
 def handle_memory_reason(args: dict[str, Any]) -> str:
     """Compositional reasoning over persistent HRR knowledge."""
     engine = _require_engine()
-    entities = list(args.get("entities", []))
+    entities = [str(e).strip() for e in args.get("entities", []) if isinstance(e, str) and str(e).strip()]
     action = str(args.get("action", "reason")).strip()
 
     if not entities:
-        return "Error: entities list must not be empty."
+        return "No valid entities provided. Pass a list of entity names."
 
     if engine.hrr_store is None:
         return (
@@ -299,19 +294,6 @@ def handle_memory_reason(args: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# memory_budget
-# ---------------------------------------------------------------------------
-
-
-def handle_memory_budget(args: dict[str, Any]) -> str:
-    """Token budget breakdown — delegates to lcm_budget."""
-    _require_engine()  # raise RuntimeError early if no engine registered
-    from agent.lcm.tools import handle_lcm_budget
-
-    return handle_lcm_budget(args)
-
-
-# ---------------------------------------------------------------------------
 # Schema dict for tool registration
 # ---------------------------------------------------------------------------
 
@@ -327,5 +309,4 @@ MEMORY_TOOL_HANDLERS: dict[str, Any] = {
     "memory_expand": handle_memory_expand,
     "memory_forget": handle_memory_forget,
     "memory_reason": handle_memory_reason,
-    "memory_budget": handle_memory_budget,
 }

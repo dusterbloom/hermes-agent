@@ -1,13 +1,12 @@
 """Tests for the unified memory_* tool surface (agent/lcm/hrr/schemas.py + tools.py).
 
 Coverage:
-- Schema validation: 6 schemas, each with name/description/parameters
+- Schema validation: 5 schemas, each with name/description/parameters
 - memory_search: DAM -> HRR -> keyword fallback routing
 - memory_pin: delegates to lcm_pin + crystallizes to HRR
 - memory_expand: session source -> lcm_expand, memory source -> HRR query
 - memory_forget: delegates to lcm_forget, lower_trust -> record_feedback
 - memory_reason: probe/related/reason/contradict actions
-- memory_budget: delegates to lcm_budget
 - No-engine guard: RuntimeError when engine not registered
 - Backward compat: old lcm_* and dam_* tools still importable and functional
 """
@@ -63,16 +62,16 @@ def _make_mock_retriever():
 
 
 class TestMemoryToolSchemas:
-    """All 6 schemas must exist and be well-formed."""
+    """All 5 schemas must exist and be well-formed."""
 
     def test_import_memory_tool_schemas(self):
         from agent.lcm.hrr.schemas import MEMORY_TOOL_SCHEMAS  # noqa: F401
 
-    def test_exactly_six_schemas(self):
+    def test_exactly_five_schemas(self):
         from agent.lcm.hrr.schemas import MEMORY_TOOL_SCHEMAS
 
-        assert len(MEMORY_TOOL_SCHEMAS) == 6, (
-            f"Expected 6 schemas, got {len(MEMORY_TOOL_SCHEMAS)}: "
+        assert len(MEMORY_TOOL_SCHEMAS) == 5, (
+            f"Expected 5 schemas, got {len(MEMORY_TOOL_SCHEMAS)}: "
             f"{list(MEMORY_TOOL_SCHEMAS.keys())}"
         )
 
@@ -82,7 +81,6 @@ class TestMemoryToolSchemas:
         "memory_expand",
         "memory_forget",
         "memory_reason",
-        "memory_budget",
     ])
     def test_schema_has_required_keys(self, tool_name: str):
         from agent.lcm.hrr.schemas import MEMORY_TOOL_SCHEMAS
@@ -98,7 +96,6 @@ class TestMemoryToolSchemas:
         "memory_expand",
         "memory_forget",
         "memory_reason",
-        "memory_budget",
     ])
     def test_schema_name_matches_key(self, tool_name: str):
         from agent.lcm.hrr.schemas import MEMORY_TOOL_SCHEMAS
@@ -138,12 +135,6 @@ class TestMemoryToolSchemas:
         props = MEMORY_TOOL_SCHEMAS["memory_reason"]["parameters"]["properties"]
         assert set(props["action"]["enum"]) == {"probe", "related", "reason", "contradict"}
 
-    def test_memory_budget_has_no_required_params(self):
-        from agent.lcm.hrr.schemas import MEMORY_TOOL_SCHEMAS
-
-        schema = MEMORY_TOOL_SCHEMAS["memory_budget"]
-        assert schema["parameters"]["required"] == []
-
 
 # ---------------------------------------------------------------------------
 # 2. No-engine guard
@@ -165,7 +156,6 @@ class TestRequireEngineGuard:
         ("handle_memory_expand", {"message_ids": [0]}),
         ("handle_memory_forget", {"message_ids": [0]}),
         ("handle_memory_reason", {"entities": ["test"]}),
-        ("handle_memory_budget", {}),
     ])
     def test_raises_without_engine(self, handler_name: str, args: dict):
         import agent.lcm.hrr.tools as t
@@ -501,7 +491,7 @@ class TestMemoryReason:
         from agent.lcm.hrr.tools import handle_memory_reason
 
         result = handle_memory_reason({"entities": []})
-        assert "Error" in result
+        assert "No valid entities" in result or "Error" in result
 
     def test_reason_default_action_is_reason(self):
         """Default action='reason' calls retriever.reason()."""
@@ -628,45 +618,7 @@ class TestMemoryReason:
 
 
 # ---------------------------------------------------------------------------
-# 8. memory_budget
-# ---------------------------------------------------------------------------
-
-
-class TestMemoryBudget:
-
-    def setup_method(self):
-        self.engine = _make_engine()
-        set_engine(self.engine)
-
-    def teardown_method(self):
-        set_engine(None)
-
-    def test_budget_returns_lcm_budget_output(self):
-        """memory_budget must return the same output as lcm_budget."""
-        from agent.lcm.hrr.tools import handle_memory_budget
-        from agent.lcm.tools import handle_lcm_budget
-
-        budget_result = handle_memory_budget({})
-        lcm_result = handle_lcm_budget({})
-        assert budget_result == lcm_result
-
-    def test_budget_contains_expected_fields(self):
-        from agent.lcm.hrr.tools import handle_memory_budget
-
-        result = handle_memory_budget({})
-        assert "Active" in result
-        assert "tokens" in result.lower()
-
-    def test_budget_accepts_empty_args(self):
-        from agent.lcm.hrr.tools import handle_memory_budget
-
-        result = handle_memory_budget({})
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-
-# ---------------------------------------------------------------------------
-# 9. Handler dispatch table
+# 8. Handler dispatch table
 # ---------------------------------------------------------------------------
 
 
@@ -675,10 +627,10 @@ class TestHandlerDispatchTable:
     def test_dispatch_table_exists(self):
         from agent.lcm.hrr.tools import MEMORY_TOOL_HANDLERS  # noqa: F401
 
-    def test_dispatch_table_has_six_entries(self):
+    def test_dispatch_table_has_five_entries(self):
         from agent.lcm.hrr.tools import MEMORY_TOOL_HANDLERS
 
-        assert len(MEMORY_TOOL_HANDLERS) == 6
+        assert len(MEMORY_TOOL_HANDLERS) == 5
 
     @pytest.mark.parametrize("tool_name", [
         "memory_search",
@@ -686,7 +638,6 @@ class TestHandlerDispatchTable:
         "memory_expand",
         "memory_forget",
         "memory_reason",
-        "memory_budget",
     ])
     def test_each_handler_is_callable(self, tool_name: str):
         from agent.lcm.hrr.tools import MEMORY_TOOL_HANDLERS

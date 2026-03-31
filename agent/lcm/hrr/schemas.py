@@ -1,6 +1,6 @@
 """Tool schemas for the unified memory_* tool surface (OpenAI function-calling format).
 
-These six tools replace 11 fragmented lcm_* / dam_* tools with a single surface
+These five tools replace 11 fragmented lcm_* / dam_* tools with a single surface
 that auto-routes across three memory layers:
 - DAM  (in-session, fast)        via engine.retriever
 - HRR  (cross-session, persistent) via engine.hrr_store
@@ -152,16 +152,6 @@ MEMORY_REASON: dict[str, Any] = {
     },
 }
 
-MEMORY_BUDGET: dict[str, Any] = {
-    "name": "memory_budget",
-    "description": "Show token usage breakdown for the current context window.",
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-}
-
 # Registry dict — used by the tool registration layer
 MEMORY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "memory_search": MEMORY_SEARCH,
@@ -169,5 +159,4 @@ MEMORY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "memory_expand": MEMORY_EXPAND,
     "memory_forget": MEMORY_FORGET,
     "memory_reason": MEMORY_REASON,
-    "memory_budget": MEMORY_BUDGET,
 }

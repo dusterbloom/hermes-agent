@@ -1173,7 +1173,13 @@ class AIAgent:
         self._subdirectory_hints = SubdirectoryHintTracker(
             working_dir=os.getenv("TERMINAL_CWD") or None,
         )
-        
+
+        # Initialize HRR persistent store for cross-session knowledge
+        try:
+            from agent.lcm.hrr.store import MemoryStore as _HrrStore
+            self.lcm_engine.hrr_store = _HrrStore()  # ~/.hermes/memory_store.db
+        except (ImportError, Exception):
+            pass  # HRR not available or init failed
         # If compression is disabled, set tau thresholds to effectively disable auto-compaction
         if not compression_enabled:
             self.lcm_engine.config.tau_soft = 2.0  # Never triggers
@@ -1201,6 +1207,19 @@ class AIAgent:
             ]
             self.tools = list(self.tools) + _lcm_tool_defs
             self.valid_tool_names.update(LCM_TOOL_SCHEMAS.keys())
+
+        # Register unified memory_* tools (HRR-backed persistent knowledge)
+        try:
+            from agent.lcm.hrr.schemas import MEMORY_TOOL_SCHEMAS as _mem_schemas
+            if self.tools is not None and len(self.tools) > 0:
+                _mem_tool_defs = [
+                    {"type": "function", "function": schema}
+                    for schema in _mem_schemas.values()
+                ]
+                self.tools = list(self.tools) + _mem_tool_defs
+                self.valid_tool_names.update(_mem_schemas.keys())
+        except ImportError:
+            pass  # HRR module not available
 
         # Context pressure warning flag — reset to False on init and after compaction
         self._context_pressure_warned = False
@@ -6195,6 +6214,9 @@ class AIAgent:
                 "lcm_focus": handle_lcm_focus,
             }
             return _lcm_dispatch[function_name](function_args)
+        elif function_name in ("memory_search", "memory_pin", "memory_expand", "memory_forget", "memory_reason"):
+            from agent.lcm.hrr.tools import MEMORY_TOOL_HANDLERS
+            return MEMORY_TOOL_HANDLERS[function_name](function_args)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -6634,6 +6656,12 @@ class AIAgent:
                     "lcm_focus": handle_lcm_focus,
                 }
                 function_result = _lcm_dispatch[function_name](function_args)
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
+            elif function_name in ("memory_search", "memory_pin", "memory_expand", "memory_forget", "memory_reason"):
+                from agent.lcm.hrr.tools import MEMORY_TOOL_HANDLERS
+                function_result = MEMORY_TOOL_HANDLERS[function_name](function_args)
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
