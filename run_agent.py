@@ -89,6 +89,7 @@ from agent.model_metadata import (
 )
 from agent.lcm.config import LcmConfig
 from agent.lcm.engine import LcmEngine, CompactionAction
+from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
@@ -1194,7 +1195,26 @@ class AIAgent:
             self.lcm_engine.config.protect_last_n,
             self.lcm_engine.context_length,
         )
-        
+
+        # Initialize legacy ContextCompressor for backward compatibility.
+        # v0.7.0 code paths still read attributes from self.context_compressor
+        # (e.g. last_prompt_tokens, context_length, threshold_tokens).  The LCM
+        # engine now handles actual compression, but we keep this object alive so
+        # attribute accesses in token-counting, fallback, and session-state code
+        # don't raise AttributeError.
+        self.context_compressor = ContextCompressor(
+            model=self.model,
+            base_url=self.base_url,
+            api_key=getattr(self, "api_key", ""),
+            provider=self.provider,
+            config_context_length=_config_context_length,
+            threshold_percent=compression_threshold,
+            protect_last_n=compression_protect_last,
+            summary_target_ratio=compression_target_ratio,
+            summary_model_override=compression_summary_model,
+            quiet_mode=True,  # LCM engine drives compression; suppress CC log noise
+        )
+
         # Context probing flag - set when we step down from a context error
         self._context_probed = False
         
