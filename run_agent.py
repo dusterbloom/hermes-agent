@@ -9710,6 +9710,29 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
+            elif self._context_engine_tool_names and function_name in self._context_engine_tool_names:
+                # Context engine tools (lcm_grep, lcm_describe, lcm_expand, etc.)
+                spinner = None
+                if self.quiet_mode and not self.tool_progress_callback:
+                    face = random.choice(KawaiiSpinner.KAWAII_WAITING)
+                    emoji = _get_tool_emoji(function_name)
+                    preview = _build_tool_preview(function_name, function_args) or function_name
+                    spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=self._print_fn)
+                    spinner.start()
+                _ce_result = None
+                try:
+                    function_result = self.context_compressor.handle_tool_call(function_name, function_args, messages=messages)
+                    _ce_result = function_result
+                except Exception as tool_error:
+                    function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
+                    logger.error("context_engine.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                finally:
+                    tool_duration = time.time() - tool_start_time
+                    cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_ce_result)
+                    if spinner:
+                        spinner.stop(cute_msg)
+                    elif self.quiet_mode:
+                        self._vprint(f"  {cute_msg}")
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
                 # Memory provider tools (hindsight_retain, honcho_search, etc.)
                 # These are not in the tool registry — route through MemoryManager.
