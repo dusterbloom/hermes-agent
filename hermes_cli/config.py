@@ -699,6 +699,18 @@ DEFAULT_CONFIG = {
         "force_ipv4": False,
     },
 
+    # LCM (Lossless Context Management) engine settings.
+    # Only used when context.engine is set to "lcm".
+    # Three-layer memory: L1 Hot (LLM summarization), L2 Warm (DAM), L3 Cold (HRR).
+    "lcm": {
+        "enabled": True,
+        "tau_soft": 0.50,           # Soft threshold — trigger async compaction
+        "tau_hard": 0.85,           # Hard threshold — trigger blocking compaction
+        "deterministic_target": 512,
+        "protect_last_n": 4,
+        "summary_model": "",        # Empty = use main configured model
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 17,
 }
