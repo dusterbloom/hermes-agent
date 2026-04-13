@@ -140,6 +140,7 @@ class LcmContextEngine(ContextEngine):
         self,
         messages: List[Dict[str, Any]],
         current_tokens: int = None,
+        focus_topic: str = None,
     ) -> List[Dict[str, Any]]:
         """Ingest any new messages, then compact if needed.
 

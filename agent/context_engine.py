@@ -78,6 +78,7 @@ class ContextEngine(ABC):
         self,
         messages: List[Dict[str, Any]],
         current_tokens: int = None,
+        focus_topic: str = None,
     ) -> List[Dict[str, Any]]:
         """Compact the message list and return the new message list.
 
