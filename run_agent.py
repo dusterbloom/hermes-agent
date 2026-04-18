@@ -1899,42 +1899,77 @@ class AIAgent:
 
 
         # Select context engine: config-driven (like memory providers).
-        # 1. Check config.yaml context.engine setting
-        # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
-        # 3. Check general plugin system (user-installed plugins)
-        # 4. Fall back to built-in ContextCompressor
+        # 1. Check config.yaml context.engine setting (lcm/rlm/compressor)
+        # 2. Check config.yaml context.rlm (enable RLM companion)
+        # 3. Check plugins/context_engine/<name>/ directory (repo-shipped)
+        # 4. Check general plugin system (user-installed plugins)
+        # 5. Fall back to built-in ContextCompressor
         _selected_engine = None
         _engine_name = "compressor"  # default
+        _rlm_enabled = False  # RLM companion mode flag
         try:
             _ctx_cfg = _agent_cfg.get("context", {}) if isinstance(_agent_cfg, dict) else {}
             _engine_name = _ctx_cfg.get("engine", "compressor") or "compressor"
+            _rlm_enabled = bool(_ctx_cfg.get("rlm", False))
         except Exception:
             pass
 
-        if _engine_name != "compressor":
-            # Try loading from plugins/context_engine/<name>/
+        # Load plugin engine(s)
+        if _engine_name == "compressor" or _engine_name not in ("lcm", "rlm"):
+            # Explicitly using built-in compressor (default)
+            pass
+        elif _engine_name == "rlm":
+            # Standalone RLM mode (no compression, uses REPL)
             try:
                 from plugins.context_engine import load_context_engine
-                _selected_engine = load_context_engine(_engine_name)
+                _selected_engine = load_context_engine("rlm", rlm_config=_ctx_cfg.get("rlm_config", {}))
             except Exception as _ce_load_err:
                 logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+        else:
+            # LCM or other engine name — check if RLM companion is requested
+            rlm_kwargs = {}
+            rlm_config = _ctx_cfg.get("rlm_config", {})
+            rlm_kwargs["rlm_config"] = rlm_config
 
-            # Try general plugin system as fallback
-            if _selected_engine is None:
+            if _rlm_enabled:
+                # Composite mode: LCM + RLM
                 try:
-                    from hermes_cli.plugins import get_plugin_context_engine
-                    _candidate = get_plugin_context_engine()
-                    if _candidate and _candidate.name == _engine_name:
-                        _selected_engine = _candidate
-                except Exception:
-                    pass
+                    from plugins.context_engine import load_composite_engine
+                    _selected_engine = load_composite_engine(
+                        compression_name=_engine_name,
+                        rlm_enabled=True,
+                        **rlm_kwargs,
+                    )
+                except Exception as _ce_load_err:
+                    logger.debug("Composite engine load failed (%s), falling back to RLM only", _ce_load_err)
+                    _selected_engine = None
 
             if _selected_engine is None:
-                logger.warning(
-                    "Context engine '%s' not found — falling back to built-in compressor",
-                    _engine_name,
-                )
-        # else: config says "compressor" — use built-in, don't auto-activate plugins
+                # Pure engine mode (no RLM)
+                try:
+                    from plugins.context_engine import load_context_engine
+                    _selected_engine = load_context_engine(
+                        _engine_name,
+                        rlm_config=rlm_kwargs.get("rlm_config"),
+                    )
+                except Exception as _ce_load_err:
+                    logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+
+        # Try general plugin system as fallback
+        if _selected_engine is None:
+            try:
+                from hermes_cli.plugins import get_plugin_context_engine
+                _candidate = get_plugin_context_engine()
+                if _candidate and _candidate.name == _engine_name:
+                    _selected_engine = _candidate
+            except Exception:
+                pass
+
+        if _selected_engine is None:
+            logger.warning(
+                "Context engine '%s' not found — falling back to built-in compressor",
+                _engine_name,
+            )
 
         if _selected_engine is not None:
             self.context_compressor = _selected_engine
@@ -10654,7 +10689,7 @@ class AIAgent:
                     native_anthropic=self._use_native_cache_layout,
                 )
 
-            # Safety net: strip orphaned tool results / add stubs for missing
+                       # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
             # gated on context_compressor — so orphans from session loading or
             # manual message manipulation are always caught.
@@ -10669,6 +10704,17 @@ class AIAgent:
             # stored conversation history keeps the reasoning block for the
             # UI transcript and session persistence.
             api_messages = self._drop_thinking_only_and_merge_users(api_messages)
+
+            # ── Refresh RLM context ────────────────────────────────────────
+            # Update the RLM REPL environment with the latest messages
+            # so peek/grep/partition work on current context.
+            try:
+                if hasattr(self, "context_compressor") and self.context_compressor:
+                    refresh = getattr(self.context_compressor, "refresh_context", None)
+                    if refresh and callable(refresh):
+                        refresh(api_messages)
+            except Exception as _refresh_err:
+                logger.debug("RLM context refresh failed: %s", _refresh_err)
 
             # Normalize message whitespace and tool-call JSON for consistent
             # prefix matching.  Ensures bit-perfect prefixes across turns,

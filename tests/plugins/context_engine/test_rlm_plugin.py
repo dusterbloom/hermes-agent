@@ -1,7 +1,8 @@
 """Tests for the RLM ContextEngine plugin.
 
 Verifies that the RLM plugin correctly implements the ContextEngine ABC,
-exposes tool schemas, and handles tool calls.
+exposes tool schemas, handles tool calls, and works in composite mode
+with LCM.
 """
 
 import json
@@ -10,8 +11,9 @@ import textwrap
 
 from plugins.context_engine.rlm import (
     RlmContextEngine,
-    RLM_TOOL_SCHEMAS,
     RLMAgentEnvironment,
+    CompositeContextEngine,
+    RLM_TOOL_SCHEMAS,
 )
 
 
@@ -34,7 +36,9 @@ class TestRlmContextEngineIdentity:
         assert engine.threshold_percent == 1.0  # Never triggers compression
 
     def test_custom_config(self):
-        engine = RlmContextEngine(rlm_config={"max_iterations": 30, "output_limit": 4096})
+        engine = RlmContextEngine(
+            rlm_config={"max_iterations": 30, "output_limit": 4096}
+        )
         assert engine._max_iterations == 30
         assert engine._output_limit == 4096
 
@@ -225,6 +229,240 @@ class TestRlmContextEngineToolboxIntegration:
             assert "properties" in params or "required" in params
 
 
+# ── CompositeContextEngine Tests ─────────────────────────────────────────
+
+
+class TestCompositeContextEngine:
+    """Test the LCM + RLM composite engine."""
+
+    def test_composite_name(self):
+        """Composite engine should have a combined name."""
+        class MockCompression:
+            def __init__(self):
+                self.name = "lcm"
+            def get_tool_schemas(self):
+                return []
+            def handle_tool_call(self, name, args, **kwargs):
+                return json.dumps({"result": "ok"})
+            def should_compress(self, prompt_tokens=None):
+                return True
+            def should_compress_preflight(self, messages):
+                return True
+            def compress(self, messages, current_tokens=None):
+                return list(messages)
+            def on_session_start(self, *args, **kwargs):
+                pass
+            def on_session_end(self, *args, **kwargs):
+                pass
+            def on_session_reset(self):
+                pass
+            def update_from_response(self, usage):
+                pass
+            def update_model(self, **kwargs):
+                pass
+            def get_status(self):
+                return {}
+
+        engine = CompositeContextEngine(MockCompression())
+        assert engine.name == "lcm"
+
+        engine_with_rlm = CompositeContextEngine(MockCompression(), RlmContextEngine())
+        assert engine_with_rlm.name == "lcm+rlm"
+
+    def test_delegate_compression(self):
+        """Compression should delegate to the compression engine."""
+        class MockCompression:
+            def __init__(self):
+                self.name = "lcm"
+                self._should_compress_calls = 0
+            def get_tool_schemas(self):
+                return []
+            def handle_tool_call(self, name, args, **kwargs):
+                return json.dumps({"result": "ok"})
+            def should_compress(self, prompt_tokens=None):
+                self._should_compress_calls += 1
+                return True
+            def should_compress_preflight(self, messages):
+                return True
+            def compress(self, messages, current_tokens=None):
+                return list(messages)
+            def on_session_start(self, *args, **kwargs):
+                pass
+            def on_session_end(self, *args, **kwargs):
+                pass
+            def on_session_reset(self):
+                pass
+            def update_from_response(self, usage):
+                pass
+            def update_model(self, **kwargs):
+                pass
+            def get_status(self):
+                return {}
+
+        mock = MockCompression()
+        engine = CompositeContextEngine(mock)
+        assert engine.should_compress(1000) is True
+        assert mock._should_compress_calls == 1
+
+    def test_delegate_compress(self):
+        """compress() should delegate to compression engine."""
+        class MockCompression:
+            def __init__(self):
+                self.name = "lcm"
+            def get_tool_schemas(self):
+                return []
+            def handle_tool_call(self, name, args, **kwargs):
+                return json.dumps({"result": "ok"})
+            def should_compress(self, prompt_tokens=None):
+                return False
+            def should_compress_preflight(self, messages):
+                return False
+            def compress(self, messages, current_tokens=None):
+                # Modify messages to prove delegation
+                modified = list(messages)
+                modified.append({"role": "system", "content": "compressed"})
+                return modified
+            def on_session_start(self, *args, **kwargs):
+                pass
+            def on_session_end(self, *args, **kwargs):
+                pass
+            def on_session_reset(self):
+                pass
+            def update_from_response(self, usage):
+                pass
+            def update_model(self, **kwargs):
+                pass
+            def get_status(self):
+                return {}
+
+        mock = MockCompression()
+        engine = CompositeContextEngine(mock)
+        messages = [{"role": "user", "content": "hello"}]
+        result = engine.compress(messages)
+        assert len(result) == 2  # Original + compressed addition
+        assert result[-1]["content"] == "compressed"
+
+    def test_combine_tool_schemas(self):
+        """Tool schemas should combine from both engines."""
+        class MockCompression:
+            def __init__(self):
+                self.name = "lcm"
+            def get_tool_schemas(self):
+                return [
+                    {"name": "lcm_grep", "parameters": {}},
+                    {"name": "lcm_expand", "parameters": {}},
+                ]
+            def handle_tool_call(self, name, args, **kwargs):
+                return json.dumps({"result": "ok"})
+            def should_compress(self, prompt_tokens=None):
+                return True
+            def should_compress_preflight(self, messages):
+                return True
+            def compress(self, messages, current_tokens=None):
+                return list(messages)
+            def on_session_start(self, *args, **kwargs):
+                pass
+            def on_session_end(self, *args, **kwargs):
+                pass
+            def on_session_reset(self):
+                pass
+            def update_from_response(self, usage):
+                pass
+            def update_model(self, **kwargs):
+                pass
+            def get_status(self):
+                return {}
+
+        mock = MockCompression()
+        engine = CompositeContextEngine(mock, RlmContextEngine())
+        schemas = engine.get_tool_schemas()
+        names = {s["name"] for s in schemas}
+        assert "lcm_grep" in names
+        assert "lcm_expand" in names
+        assert "rlm_peek" in names
+        assert "rlm_grep" in names
+        assert "rlm_partition" in names
+
+    def test_dispatch_rlm_tools(self):
+        """RLM tool calls should be dispatched to the RLM engine."""
+        class MockCompression:
+            def __init__(self):
+                self.name = "lcm"
+            def get_tool_schemas(self):
+                return []
+            def handle_tool_call(self, name, args, **kwargs):
+                return json.dumps({"from": "compression"})
+            def should_compress(self, prompt_tokens=None):
+                return True
+            def should_compress_preflight(self, messages):
+                return True
+            def compress(self, messages, current_tokens=None):
+                return list(messages)
+            def on_session_start(self, *args, **kwargs):
+                pass
+            def on_session_end(self, *args, **kwargs):
+                pass
+            def on_session_reset(self):
+                pass
+            def update_from_response(self, usage):
+                pass
+            def update_model(self, **kwargs):
+                pass
+            def get_status(self):
+                return {}
+
+        mock = MockCompression()
+        rlm = RlmContextEngine()
+        rlm._session_context = "Hello World"
+        rlm._rlm_env = RLMAgentEnvironment("Hello World")
+
+        engine = CompositeContextEngine(mock, rlm)
+        result = engine.handle_tool_call("rlm_peek", {"start": 0, "length": 5})
+        data = json.loads(result)
+        assert data["snippet"] == "Hello"
+        assert "from" not in data  # Should be from RLM, not compression
+
+    def test_refresh_context(self):
+        """refresh_context should update the RLM environment."""
+        class MockCompression:
+            def __init__(self):
+                self.name = "lcm"
+            def get_tool_schemas(self):
+                return []
+            def handle_tool_call(self, name, args, **kwargs):
+                return json.dumps({"result": "ok"})
+            def should_compress(self, prompt_tokens=None):
+                return True
+            def should_compress_preflight(self, messages):
+                return True
+            def compress(self, messages, current_tokens=None):
+                return list(messages)
+            def on_session_start(self, *args, **kwargs):
+                pass
+            def on_session_end(self, *args, **kwargs):
+                pass
+            def on_session_reset(self):
+                pass
+            def update_from_response(self, usage):
+                pass
+            def update_model(self, **kwargs):
+                pass
+            def get_status(self):
+                return {}
+
+        mock = MockCompression()
+        engine = CompositeContextEngine(mock, RlmContextEngine())
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello, world!"},
+        ]
+        engine.refresh_context(messages)
+
+        expected = "[system]: You are helpful.\n\n[user]: Hello, world!"
+        assert engine._rlm_engine._session_context == expected
+
+
 # ── RLMAgentEnvironment Tests ───────────────────────────────────────────
 
 
@@ -334,3 +572,56 @@ class TestRlmToolboxSchemas:
     def test_schemas_descriptions_not_empty(self):
         for schema in RLM_TOOL_SCHEMAS.values():
             assert len(schema["description"]) > 50
+
+
+# ── build_context_from_messages Tests ───────────────────────────────────
+
+
+class TestBuildContextFromMessages:
+    """Test context building from conversation messages."""
+
+    def test_simple_messages(self):
+        engine = RlmContextEngine()
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+        context = engine.build_context_from_messages(messages)
+        assert "[system]: You are helpful." in context
+        assert "[user]: Hello" in context
+        assert "[assistant]: Hi there!" in context
+
+    def test_structured_content(self):
+        """Test with multi-part content (text + tool_use)."""
+        engine = RlmContextEngine()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hello"},
+                    {"type": "tool_use", "name": "search", "input": {"q": "test"}},
+                ],
+            },
+        ]
+        context = engine.build_context_from_messages(messages)
+        assert "[user]: Hello" in context
+        assert "[user]: {\"q\": \"test\"}" in context  # tool_use input
+
+    def test_empty_messages(self):
+        engine = RlmContextEngine()
+        context = engine.build_context_from_messages([])
+        assert context == ""
+
+    def test_refresh_context(self):
+        """Test that refresh_context updates the REPL namespace."""
+        engine = RlmContextEngine()
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "User message"},
+        ]
+        engine.refresh_context(messages)
+        expected = "[system]: System prompt\n\n[user]: User message"
+        assert engine._session_context == expected
+        assert engine._rlm_env is None  # Not initialized yet
+        assert engine._session_context is not None  # But session context is set
