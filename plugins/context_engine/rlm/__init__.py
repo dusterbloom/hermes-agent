@@ -1,28 +1,32 @@
 """Recursive Language Model context engine plugin.
 
 Implements the RLM paradigm (arXiv:2512.24601) as a ContextEngine plugin.
-Instead of compressing messages, the RLM treats the prompt as an external
-Python variable in a REPL environment, allowing the LLM to programmatically
-peek, grep, chunk, and recursively call sub-LLMs over the context.
+The RLM treats the prompt as an external Python variable in a REPL
+environment, allowing the LLM to programmatically peek, grep, chunk,
+and recursively call sub-LLMs over the context.
 
-Activation: set ``context.engine: rlm`` in config.yaml.
+Usage:
+  - As a standalone engine: set context.engine: rlm in config.yaml
+  - As a companion to LCM: set context.engine: lcm + context.rlm: true
 
-Requires an external LLM provider (OpenAI, custom, etc.) for the root and
-sub-LLM calls.
+When used with LCM, RLM provides peek/grep/partition tools while LCM
+handles message compression. This is the recommended configuration.
+
+Requires an external LLM provider (OpenAI, custom, etc.) for sub-LLM calls.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 import textwrap
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from agent.context_engine import ContextEngine
 
 logger = logging.getLogger(__name__)
+
 
 # ── RLM REPL Environment ──────────────────────────────────────────────────
 
@@ -110,11 +114,9 @@ class RLMAgentEnvironment:
         Each prompt is a question about a subset of __context__.
         Returns list of answers from sub-LLMs.
 
-        Note: This is a stub — the real implementation in
-        RLMAgentEnvironment delegates to RLMAgent._call_sub_llm.
+        Note: This is a stub — the real implementation delegates to
+        the connected LLM client.
         """
-        # Placeholder — will be replaced when the environment is connected
-        # to the actual LLM client
         return []
 
     def _llm_call_handler(self, prompt: str) -> str:
@@ -142,8 +144,11 @@ class RlmContextEngine(ContextEngine):
     an external Python variable and allows the root LLM to programmatically
     interact with it via a REPL environment.
 
+    When used as a companion to LCM, RLM provides tools (rlm_peek,
+    rlm_grep, rlm_partition) while LCM handles compression.
+
     Key design decisions:
-    - Never compresses messages (returns them unchanged)
+    - Never compresses messages (delegates to companion engine)
     - Exposes rlm_peek, rlm_grep, rlm_partition tools to the agent
     - Sub-LLMs get tools, root LLM does not (keeps root context clean)
     - Parallel batch sub-LLM calls via llm_batch()
@@ -187,7 +192,7 @@ class RlmContextEngine(ContextEngine):
         self.last_total_tokens = total
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
-        """RLM never compresses — it handles unbounded context via REPL."""
+        """RLM never compresses on its own — delegates to companion."""
         return False
 
     def should_compress_preflight(self, messages: List[Dict[str, Any]]) -> bool:
@@ -199,11 +204,11 @@ class RlmContextEngine(ContextEngine):
         messages: List[Dict[str, Any]],
         current_tokens: int = None,
     ) -> List[Dict[str, Any]]:
-        """Return messages unchanged.
+        """Pass messages through unchanged.
 
-        RLM doesn't compress — it delegates context management to the
-        REPL environment. The agent interacts with context via tools
-        (rlm_peek, rlm_grep, etc.).
+        When used as a companion to LCM, LCM handles compression.
+        When used standalone, RLM doesn't compress — it delegates
+        context management to the REPL environment.
         """
         return list(messages)
 
@@ -214,7 +219,7 @@ class RlmContextEngine(ContextEngine):
         self.context_length = kwargs.get("context_length", 128_000)
         self.threshold_tokens = self.context_length
 
-        # Extract context from config if provided
+        # Extract context from kwargs — passed by the agent
         context = kwargs.get("rlm_context")
         if context:
             self._session_context = context
@@ -236,6 +241,43 @@ class RlmContextEngine(ContextEngine):
         super().on_session_reset()
         self._session_context = None
         self._rlm_env = None
+
+    def build_context_from_messages(self, messages: List[Dict[str, Any]]) -> str:
+        """Build a flat context string from LLM messages for the REPL.
+
+        This is called by the agent so the RLM engine can populate
+        its context with the actual conversation.
+        """
+        parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                parts.append(f"[{role}]: {content}")
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text" and item.get("text"):
+                            parts.append(f"[{role}]: {item['text']}")
+                        elif item.get("type") == "tool_use":
+                            parts.append(f"[{role}]: {json.dumps(item.get('input', {}))}")
+        return "\n\n".join(parts)
+
+    def refresh_context(self, messages: List[Dict[str, Any]]) -> None:
+        """Rebuild the REPL context from the latest messages.
+
+        Call this before each API call to keep the context fresh.
+        """
+        context = self.build_context_from_messages(messages)
+        if context:
+            self._session_context = context
+            if self._rlm_env:
+                self._rlm_env.context = context
+                self._rlm_env.namespace["__context__"] = context
+                self._rlm_env.namespace["__context_length__"] = len(context)
+                self._rlm_env.namespace["__context_token_length__"] = self._rlm_env._estimate_tokens(
+                    context
+                )
 
     def _init_rlm_env(self, context: str) -> None:
         """Create the REPL environment for the given context."""
@@ -329,7 +371,7 @@ class RlmContextEngine(ContextEngine):
             chunk_size: Characters per chunk (default: 8000)
             overlap: Characters of overlap between chunks (default: 500)
 
-        Returns list of chunk metadata (index, start, length).
+        Returns list of chunk metadata (index, start, end, length).
         """
         if not self._rlm_env or not self._session_context:
             return json.dumps({"error": "No context loaded"})
@@ -365,12 +407,136 @@ class RlmContextEngine(ContextEngine):
             return json.dumps({"error": f"Partition failed: {e}"})
 
 
+# ── Composite Engine (LCM + RLM) ────────────────────────────────────────
+
+
+class CompositeContextEngine(ContextEngine):
+    """Combines LCM (compression) and RLM (tools/REPL) into one engine.
+
+    When LCM is enabled for compression, this wrapper adds RLM's
+    peek/grep/partition tools alongside LCM's 7 tools. The agent gets
+    all 10 tools and LCM handles all compression automatically.
+
+    Usage in run_agent.py:
+        lcm_engine = load_context_engine("lcm", config=lcm_cfg)
+        rlm_engine = RlmContextEngine(config=rlm_cfg)
+        engine = CompositeContextEngine(lcm_engine, rlm_engine)
+    """
+
+    def __init__(
+        self,
+        compression_engine: ContextEngine,
+        rlm_engine: Optional[RlmContextEngine] = None,
+        **kwargs: Any,
+    ) -> None:
+        self._compression_engine = compression_engine
+        self._rlm_engine = rlm_engine
+
+        # Name reflects which engines are active
+        if rlm_engine is not None:
+            self._name = f"{compression_engine.name}+rlm"
+        else:
+            self._name = compression_engine.name
+
+        # Copy token tracking from compression engine
+        self.last_prompt_tokens = getattr(compression_engine, "last_prompt_tokens", 0)
+        self.last_completion_tokens = getattr(compression_engine, "last_completion_tokens", 0)
+        self.last_total_tokens = getattr(compression_engine, "last_total_tokens", 0)
+        self.context_length = getattr(compression_engine, "context_length", 0)
+        self.threshold_tokens = getattr(compression_engine, "threshold_tokens", 0)
+        self.compression_count = getattr(compression_engine, "compression_count", 0)
+        self.threshold_percent = getattr(compression_engine, "threshold_percent", 1.0)
+        self.protect_last_n = getattr(compression_engine, "protect_last_n", 3)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    # ── Core ABC interface (delegate to compression engine) ────────────
+
+    def update_from_response(self, usage: Dict[str, Any]) -> None:
+        self._compression_engine.update_from_response(usage)
+
+    def should_compress(self, prompt_tokens: int = None) -> bool:
+        return self._compression_engine.should_compress(prompt_tokens)
+
+    def should_compress_preflight(self, messages: List[Dict[str, Any]]) -> bool:
+        return self._compression_engine.should_compress_preflight(messages)
+
+    def compress(
+        self,
+        messages: List[Dict[str, Any]],
+        current_tokens: int = None,
+    ) -> List[Dict[str, Any]]:
+        return self._compression_engine.compress(messages, current_tokens)
+
+    # ── Session lifecycle (delegate to both) ────────────────────────────
+
+    def on_session_start(self, session_id: str, **kwargs) -> None:
+        self._compression_engine.on_session_start(session_id, **kwargs)
+        if self._rlm_engine:
+            # Pass the session messages as context for RLM
+            self._rlm_engine.on_session_start(session_id, **kwargs)
+
+    def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        self._compression_engine.on_session_end(session_id, messages)
+        if self._rlm_engine:
+            self._rlm_engine.on_session_end(session_id, messages)
+
+    def on_session_reset(self) -> None:
+        self._compression_engine.on_session_reset()
+        if self._rlm_engine:
+            self._rlm_engine.on_session_reset()
+
+    def update_model(self, **kwargs) -> None:
+        """Update model info on both engines."""
+        self._compression_engine.update_model(**kwargs)
+        if self._rlm_engine:
+            self._rlm_engine.update_model(**kwargs)
+
+    # ── Tools (combine from both engines) ───────────────────────────────
+
+    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Return combined tool schemas from LCM and RLM."""
+        schemas = list(self._compression_engine.get_tool_schemas())
+        if self._rlm_engine:
+            schemas.extend(self._rlm_engine.get_tool_schemas())
+        return schemas
+
+    def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
+        """Dispatch to the appropriate engine based on tool name."""
+        if self._rlm_engine and name.startswith("rlm_"):
+            try:
+                return self._rlm_engine.handle_tool_call(name, args, **kwargs)
+            except Exception as e:
+                return json.dumps({"error": f"RLM tool '{name}' failed: {e}"})
+        else:
+            return self._compression_engine.handle_tool_call(name, args, **kwargs)
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return combined status from both engines."""
+        status = self._compression_engine.get_status()
+        if self._rlm_engine:
+            rlm_status = self._rlm_engine.get_status()
+            status["rlm_enabled"] = True
+            status["rlm_max_iterations"] = self._rlm_engine._max_iterations
+            status["rlm_output_limit"] = self._rlm_engine._output_limit
+            status["rlm_context_loaded"] = self._rlm_engine._session_context is not None
+        return status
+
+    def refresh_context(self, messages: List[Dict[str, Any]]) -> None:
+        """Refresh the RLM context from the latest messages."""
+        if self._rlm_engine:
+            self._rlm_engine.refresh_context(messages)
+
+
 # ── Tool Schemas ────────────────────────────────────────────────────────
+
 
 RLM_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "rlm_peek": {
         "name": "rlm_peek",
-        "description": "Peek at a section of the external context stored in the RLM REPL environment. Returns a snippet of characters from the context. Use this to understand the structure of the context before deciding how to process it.",
+        "description": "Peek at a section of the context stored in the RLM REPL environment. Returns a snippet of characters from the context. Use this to understand the structure of the context before deciding how to process it.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -406,7 +572,7 @@ RLM_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "rlm_partition": {
         "name": "rlm_partition",
-        "description": "Partition the context into fixed-size chunks with optional overlap. Returns metadata about each chunk (index, start, end, length). Use this before rlm_batch_sub_llm to prepare chunks for parallel processing.",
+        "description": "Partition the context into fixed-size chunks with optional overlap. Returns metadata about each chunk (index, start, end, length). Use this to prepare chunks for parallel processing.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -429,9 +595,20 @@ RLM_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
 
 def register(ctx) -> None:
-    """Plugin entry point — register RLM as the context engine."""
+    """Plugin entry point — register RLM as a context engine."""
     engine = RlmContextEngine()
     if hasattr(ctx, "register_context_engine"):
         ctx.register_context_engine(engine)
     else:
         logger.warning("RLM plugin: context engine registration not supported")
+
+
+# ── Export ──────────────────────────────────────────────────────────────
+
+__all__ = [
+    "RlmContextEngine",
+    "RLMAgentEnvironment",
+    "CompositeContextEngine",
+    "RLM_TOOL_SCHEMAS",
+    "register",
+]
