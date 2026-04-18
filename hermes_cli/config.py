@@ -826,14 +826,21 @@ DEFAULT_CONFIG = {
         "max_ms": 2500,
     },
     
-    # Context engine -- controls how the context window is managed when
+       # Context engine -- controls how the context window is managed when
     # approaching the model's token limit.
     # "compressor" = built-in lossy summarization (default).
-    # Set to a plugin name to activate an alternative engine (e.g. "lcm"
-    # for Lossless Context Management).  The engine must be installed as
-    # a plugin in plugins/context_engine/<name>/ or ~/.hermes/plugins/.
+    # "lcm" = Lossless Context Management (reversible compression via DAG).
+    # "rlm" = Recursive Language Model (REPL-based context interaction).
+    # For LCM+RLM mode: set engine: lcm and rlm: true
+    # The engine must be installed as a plugin in plugins/context_engine/<name>/
+    # or ~/.hermes/plugins/.
     "context": {
         "engine": "compressor",
+        "rlm": False,          # Enable RLM companion mode when engine is "lcm"
+        "rlm_config": {        # RLM-specific settings (ignored when rlm is False)
+            "max_iterations": 20,    # Max REPL iterations before auto-terminate
+            "output_limit": 8192,    # Max output chars per REPL execution
+        },
     },
 
     # Persistent memory -- bounded curated memory injected into system prompt
