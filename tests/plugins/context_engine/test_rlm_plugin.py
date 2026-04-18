@@ -248,7 +248,7 @@ class TestCompositeContextEngine:
                 return True
             def should_compress_preflight(self, messages):
                 return True
-            def compress(self, messages, current_tokens=None):
+            def compress(self, messages, current_tokens=None, focus_topic=None):
                 return list(messages)
             def on_session_start(self, *args, **kwargs):
                 pass
@@ -284,7 +284,7 @@ class TestCompositeContextEngine:
                 return True
             def should_compress_preflight(self, messages):
                 return True
-            def compress(self, messages, current_tokens=None):
+            def compress(self, messages, current_tokens=None, focus_topic=None):
                 return list(messages)
             def on_session_start(self, *args, **kwargs):
                 pass
@@ -317,7 +317,7 @@ class TestCompositeContextEngine:
                 return False
             def should_compress_preflight(self, messages):
                 return False
-            def compress(self, messages, current_tokens=None):
+            def compress(self, messages, current_tokens=None, focus_topic=None):
                 # Modify messages to prove delegation
                 modified = list(messages)
                 modified.append({"role": "system", "content": "compressed"})
@@ -358,7 +358,7 @@ class TestCompositeContextEngine:
                 return True
             def should_compress_preflight(self, messages):
                 return True
-            def compress(self, messages, current_tokens=None):
+            def compress(self, messages, current_tokens=None, focus_topic=None):
                 return list(messages)
             def on_session_start(self, *args, **kwargs):
                 pass
@@ -396,7 +396,7 @@ class TestCompositeContextEngine:
                 return True
             def should_compress_preflight(self, messages):
                 return True
-            def compress(self, messages, current_tokens=None):
+            def compress(self, messages, current_tokens=None, focus_topic=None):
                 return list(messages)
             def on_session_start(self, *args, **kwargs):
                 pass
@@ -435,7 +435,7 @@ class TestCompositeContextEngine:
                 return True
             def should_compress_preflight(self, messages):
                 return True
-            def compress(self, messages, current_tokens=None):
+            def compress(self, messages, current_tokens=None, focus_topic=None):
                 return list(messages)
             def on_session_start(self, *args, **kwargs):
                 pass

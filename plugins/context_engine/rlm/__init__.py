@@ -467,8 +467,11 @@ class CompositeContextEngine(ContextEngine):
         self,
         messages: List[Dict[str, Any]],
         current_tokens: int = None,
+        focus_topic: str = None,
     ) -> List[Dict[str, Any]]:
-        return self._compression_engine.compress(messages, current_tokens)
+        return self._compression_engine.compress(
+            messages, current_tokens, focus_topic=focus_topic
+        )
 
     # ── Session lifecycle (delegate to both) ────────────────────────────
 
