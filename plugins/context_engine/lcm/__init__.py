@@ -228,10 +228,19 @@ class LcmContextEngine(ContextEngine):
                         provider=self._engine.provider,
                         context_length=self.context_length,
                     )
-                    # Sync ingested count to match rebuilt engine
-                    self._ingested_count = len(self._engine.active)
+                    # Sync ingested count to the number of input messages that were
+                    # originally fed into this engine instance.  Using active list
+                    # length would be wrong: after compaction the active list is
+                    # shorter than the number of messages that were ingested, causing
+                    # compress() to re-ingest already-stored messages on the next call.
+                    lcm_meta = session_data.get("lcm") or {}
+                    self._ingested_count = len(lcm_meta.get("original_messages") or [])
+                else:
+                    # No save file — this is a fresh session, nothing ingested yet.
+                    self._ingested_count = 0
             except Exception as e:
                 logger.warning("LCM session rebuild failed (starting fresh): %s", e)
+                self._ingested_count = 0
 
         # Update model info if provided
         model = kwargs.get("model")
