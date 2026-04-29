@@ -341,13 +341,15 @@ class LcmContextEngine(ContextEngine):
 
 # ── Plugin registration ───────────────────────────────────────────────────
 
-def register(ctx) -> None:
+def register(ctx, **kwargs) -> None:
     """Plugin entry point — register LCM as the context engine.
 
     The plugin system or plugins/context_engine/ loader calls this.
     We create an LcmContextEngine instance and register it.
+    kwargs are forwarded to the engine constructor (e.g. lcm_config, model,
+    provider, context_length).
     """
-    engine = LcmContextEngine()
+    engine = LcmContextEngine(**kwargs)
     if hasattr(ctx, "register_context_engine"):
         ctx.register_context_engine(engine)
     else:

@@ -623,5 +623,6 @@ class TestBuildContextFromMessages:
         engine.refresh_context(messages)
         expected = "[system]: System prompt\n\n[user]: User message"
         assert engine._session_context == expected
-        assert engine._rlm_env is None  # Not initialized yet
-        assert engine._session_context is not None  # But session context is set
+        # After refresh_context, _rlm_env is bootstrapped so rlm_peek works
+        assert engine._rlm_env is not None
+        assert engine._session_context is not None

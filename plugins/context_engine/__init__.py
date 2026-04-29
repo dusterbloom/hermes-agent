@@ -228,7 +228,7 @@ def _load_engine_from_dir(
     if hasattr(mod, "register"):
         collector = _EngineCollector()
         try:
-            mod.register(collector)
+            mod.register(collector, **kwargs)
             if collector.engine:
                 return collector.engine
         except Exception as e:

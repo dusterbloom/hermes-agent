@@ -602,9 +602,12 @@ RLM_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 # ── Plugin Registration ─────────────────────────────────────────────────
 
 
-def register(ctx) -> None:
-    """Plugin entry point — register RLM as a context engine."""
-    engine = RlmContextEngine()
+def register(ctx, **kwargs) -> None:
+    """Plugin entry point — register RLM as a context engine.
+
+    kwargs are forwarded to the engine constructor (e.g. rlm_config).
+    """
+    engine = RlmContextEngine(**kwargs)
     if hasattr(ctx, "register_context_engine"):
         ctx.register_context_engine(engine)
     else:
