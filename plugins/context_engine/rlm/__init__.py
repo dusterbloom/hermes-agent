@@ -497,10 +497,17 @@ class CompositeContextEngine(ContextEngine):
             self._rlm_engine.on_session_reset()
 
     def update_model(self, **kwargs) -> None:
-        """Update model info on both engines."""
+        """Update model info on both engines and re-sync wrapper-mirrored fields."""
         self._compression_engine.update_model(**kwargs)
         if self._rlm_engine:
             self._rlm_engine.update_model(**kwargs)
+        # Re-sync wrapper-mirrored attributes from the compression engine so
+        # callers that read composite.context_length / .threshold_tokens etc.
+        # get up-to-date values rather than the stale constructor-time copies.
+        self.context_length = getattr(self._compression_engine, "context_length", self.context_length)
+        self.threshold_tokens = getattr(self._compression_engine, "threshold_tokens", self.threshold_tokens)
+        self.threshold_percent = getattr(self._compression_engine, "threshold_percent", self.threshold_percent)
+        self.protect_last_n = getattr(self._compression_engine, "protect_last_n", self.protect_last_n)
 
     # ── Tools (combine from both engines) ───────────────────────────────
 

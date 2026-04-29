@@ -462,6 +462,35 @@ class TestCompositeContextEngine:
         expected = "[system]: You are helpful.\n\n[user]: Hello, world!"
         assert engine._rlm_engine._session_context == expected
 
+    def test_update_model_resyncs_wrapper_fields(self):
+        """update_model() must re-sync context_length and threshold_tokens on the
+        composite wrapper after delegating to the compression engine."""
+        from plugins.context_engine.lcm.__init__ import LcmContextEngine
+
+        lcm = LcmContextEngine()
+        composite = CompositeContextEngine(lcm)
+
+        # Capture init values
+        init_context_length = composite.context_length
+
+        # Switch to a model with a larger context window
+        composite.update_model(
+            model="claude-opus-4-5",
+            context_length=200_000,
+            provider="anthropic",
+        )
+
+        assert composite.context_length == 200_000, (
+            f"composite.context_length={composite.context_length} — "
+            "wrapper was not re-synced after update_model"
+        )
+        # threshold_tokens should have been updated too
+        assert composite.threshold_tokens > 0, (
+            "composite.threshold_tokens should be positive after update_model"
+        )
+        # Sanity: inner engine was updated
+        assert lcm.context_length == 200_000
+
 
 # ── RLMAgentEnvironment Tests ───────────────────────────────────────────
 
