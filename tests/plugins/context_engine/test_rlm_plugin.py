@@ -655,3 +655,42 @@ class TestBuildContextFromMessages:
         # After refresh_context, _rlm_env is bootstrapped so rlm_peek works
         assert engine._rlm_env is not None
         assert engine._session_context is not None
+
+    def test_openai_style_tool_calls_included(self):
+        """OpenAI-shape tool_calls must appear in the flattened context.
+
+        Regression for: assistant messages with tool_calls=[...] and empty/null
+        content were silently dropped because the flattener only handled
+        Anthropic-style content blocks (content: [{type: tool_use, ...}]).
+        """
+        engine = RlmContextEngine()
+        messages = [
+            {"role": "user", "content": "What is the weather?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location": "Paris"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_abc123",
+                "content": "Sunny, 22°C",
+            },
+        ]
+        context = engine.build_context_from_messages(messages)
+
+        assert "get_weather" in context, (
+            f"Tool name 'get_weather' missing from flattened context.\nContext:\n{context}"
+        )
+        assert "Paris" in context, (
+            f"Tool arguments missing from flattened context.\nContext:\n{context}"
+        )
