@@ -267,11 +267,16 @@ class RlmContextEngine(ContextEngine):
         """Rebuild the REPL context from the latest messages.
 
         Call this before each API call to keep the context fresh.
+        If _rlm_env has not been created yet (no rlm_context was passed to
+        on_session_start), initialize it now from the current messages.
         """
         context = self.build_context_from_messages(messages)
         if context:
             self._session_context = context
-            if self._rlm_env:
+            if self._rlm_env is None:
+                # First call after a session start without rlm_context — bootstrap.
+                self._init_rlm_env(context)
+            else:
                 self._rlm_env.context = context
                 self._rlm_env.namespace["__context__"] = context
                 self._rlm_env.namespace["__context_length__"] = len(context)
