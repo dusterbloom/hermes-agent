@@ -214,9 +214,22 @@ class LcmContextEngine(ContextEngine):
         hermes_home = kwargs.get("hermes_home")
         if hermes_home and session_id:
             try:
-                self._engine.rebuild_from_session(hermes_home, session_id)
+                import json
+                from pathlib import Path
+                session_file = Path(hermes_home) / "sessions" / f"session_{session_id}.json"
+                if session_file.exists():
+                    session_data = json.loads(session_file.read_text(encoding="utf-8"))
+                    self._engine = LcmEngine.rebuild_from_session(
+                        session_data,
+                        self._config,
+                        model=self._engine.model,
+                        provider=self._engine.provider,
+                        context_length=self.context_length,
+                    )
+                    # Sync ingested count to match rebuilt engine
+                    self._ingested_count = len(self._engine.active)
             except Exception as e:
-                logger.debug("Session rebuild failed (starting fresh): %s", e)
+                logger.warning("LCM session rebuild failed (starting fresh): %s", e)
 
         # Update model info if provided
         model = kwargs.get("model")
