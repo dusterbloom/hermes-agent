@@ -222,6 +222,12 @@ class LcmContextEngine(ContextEngine):
 
         self.threshold_tokens = int(self.context_length * self._config.tau_soft)
 
+        # Distinguish fresh session start from compression-driven rollover.
+        # During compression rollover run_agent.py passes boundary_reason="compression"
+        # so we preserve existing engine state instead of re-initializing.
+        boundary_reason = kwargs.get("boundary_reason", "")
+        is_compression_rollover = boundary_reason == "compression"
+
         # Try session rebuild from persisted state
         hermes_home = kwargs.get("hermes_home")
         if hermes_home and session_id:
@@ -245,12 +251,15 @@ class LcmContextEngine(ContextEngine):
                     # compress() to re-ingest already-stored messages on the next call.
                     lcm_meta = session_data.get("lcm") or {}
                     self._ingested_count = len(lcm_meta.get("original_messages") or [])
-                else:
-                    # No save file — this is a fresh session, nothing ingested yet.
+                elif not is_compression_rollover:
+                    # No save file and not a compression rollover — fresh session,
+                    # nothing ingested yet.  Compression rollovers keep existing
+                    # engine state so already-compacted messages are not re-ingested.
                     self._ingested_count = 0
             except Exception as e:
                 logger.warning("LCM session rebuild failed (starting fresh): %s", e)
-                self._ingested_count = 0
+                if not is_compression_rollover:
+                    self._ingested_count = 0
 
         # Update model info if provided
         model = kwargs.get("model")
