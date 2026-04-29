@@ -25,6 +25,12 @@ from plugins.context_engine.lcm.engine import LcmEngine, CompactionAction, Conte
 from plugins.context_engine.lcm.dag import SummaryDag, SummaryNode, MessageId
 from plugins.context_engine.lcm.store import ImmutableStore
 from plugins.context_engine.lcm.tools import LCM_TOOL_SCHEMAS
+try:
+    from plugins.context_engine.lcm.hrr.tools import MEMORY_TOOL_HANDLERS
+    from plugins.context_engine.lcm.hrr.schemas import MEMORY_TOOL_SCHEMAS
+except (ImportError, Exception):
+    MEMORY_TOOL_HANDLERS: dict = {}  # type: ignore[assignment]
+    MEMORY_TOOL_SCHEMAS: dict = {}  # type: ignore[assignment]
 from plugins.context_engine.lcm.summarizer import Summarizer, SummarizerConfig
 from plugins.context_engine.lcm.tokens import TokenEstimator, TokenEstimatorConfig, estimate_messages_tokens_rough
 from plugins.context_engine.lcm.semantic import SemanticIndex, SemanticIndexConfig, NoOpSemanticIndex, create_semantic_index
@@ -277,15 +283,24 @@ class LcmContextEngine(ContextEngine):
     # ── Tools ─────────────────────────────────────────────────────────────
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        """Return all 7 LCM tool schemas."""
-        return list(LCM_TOOL_SCHEMAS.values())
+        """Return LCM and memory_* tool schemas.
+
+        Combines the 7 lcm_* schemas with the 5 memory_* schemas so the agent
+        has access to all unified memory tools.  The memory_* schemas are
+        imported at module load time and fall back to an empty dict when the
+        HRR sub-package is not installed.
+        """
+        return list(LCM_TOOL_SCHEMAS.values()) + list(MEMORY_TOOL_SCHEMAS.values())
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
-        """Dispatch LCM tool calls."""
+        """Dispatch LCM and memory_* tool calls."""
+        import json as _json
+
         # Route to the internal tool handlers via the engine
         from plugins.context_engine.lcm import tools as lcm_tools
 
-        # Ensure the engine is registered for tool handlers
+        # Ensure the engine is registered for tool handlers (used by both lcm_*
+        # and memory_* handlers — memory handlers call get_engine() internally)
         lcm_tools.set_engine(self._engine)
 
         handlers = {
@@ -298,10 +313,13 @@ class LcmContextEngine(ContextEngine):
             "lcm_focus": lcm_tools.handle_lcm_focus,
         }
 
+        # Merge memory_* handlers (imported at module level; empty dict when HRR
+        # sub-package is unavailable so this is always safe)
+        handlers.update(MEMORY_TOOL_HANDLERS)
+
         handler = handlers.get(name)
         if handler is None:
-            import json
-            return json.dumps({"error": f"Unknown LCM tool: {name}"})
+            return _json.dumps({"error": f"Unknown LCM tool: {name}"})
 
         return handler(args)
 
