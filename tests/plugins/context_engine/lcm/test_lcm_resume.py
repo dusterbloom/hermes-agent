@@ -266,3 +266,92 @@ class TestRawIdPreservationAfterFocus:
         assert rebuilt.active[1].kind == "raw"
         assert rebuilt.active[1].msg_id == 3
         assert rebuilt.active[2].msg_id == 4
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — preserve _ingested_count across compression-rollover boundaries
+# ---------------------------------------------------------------------------
+
+class TestCompressionRolloverPreservesIngestedCount:
+    """on_session_start with boundary_reason='compression' must NOT reset
+    _ingested_count — the engine state already covers those messages."""
+
+    def test_compression_rollover_preserves_ingested_count(self):
+        """boundary_reason='compression' + no save file → _ingested_count unchanged."""
+        import tempfile
+        config = LcmConfig(enabled=True)
+        outer = LcmContextEngine(lcm_config=config)
+        msgs = _make_messages(100)
+        outer.compress(msgs)
+        assert outer._ingested_count == 100
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # new_session_id has no save file — simulate compression rollover
+            outer.on_session_start(
+                "new-session-after-compression",
+                hermes_home=tmpdir,
+                boundary_reason="compression",
+            )
+
+        assert outer._ingested_count == 100, (
+            f"_ingested_count={outer._ingested_count} — "
+            "should be preserved (100) across compression rollover"
+        )
+
+    def test_initial_session_start_resets_ingested_count(self):
+        """boundary_reason='initial' + no save file → _ingested_count reset to 0."""
+        import tempfile
+        config = LcmConfig(enabled=True)
+        outer = LcmContextEngine(lcm_config=config)
+        outer._ingested_count = 50  # simulate prior state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outer.on_session_start(
+                "brand-new-session",
+                hermes_home=tmpdir,
+                boundary_reason="initial",
+            )
+
+        assert outer._ingested_count == 0, (
+            f"_ingested_count={outer._ingested_count} — "
+            "should be 0 for a brand-new session"
+        )
+
+    def test_no_boundary_reason_resets_ingested_count(self):
+        """Default (no boundary_reason kwarg) + no save file → _ingested_count=0."""
+        import tempfile
+        config = LcmConfig(enabled=True)
+        outer = LcmContextEngine(lcm_config=config)
+        outer._ingested_count = 50
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outer.on_session_start("another-new-session", hermes_home=tmpdir)
+
+        assert outer._ingested_count == 0, (
+            f"_ingested_count={outer._ingested_count} — "
+            "should be 0 when no boundary_reason is provided"
+        )
+
+    def test_compression_rollover_engine_state_unchanged(self):
+        """After compression rollover, engine's active list and store are intact."""
+        import tempfile
+        config = LcmConfig(enabled=True, protect_last_n=2)
+        outer = LcmContextEngine(lcm_config=config)
+        msgs = _make_messages(20)
+        outer.compress(msgs)
+        store_size_before = len(outer._engine.store)
+        active_size_before = len(outer._engine.active)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outer.on_session_start(
+                "rolled-over-session",
+                hermes_home=tmpdir,
+                boundary_reason="compression",
+            )
+
+        assert len(outer._engine.store) == store_size_before, (
+            "Engine store was reset during compression rollover"
+        )
+        assert len(outer._engine.active) == active_size_before, (
+            "Engine active list was reset during compression rollover"
+        )
