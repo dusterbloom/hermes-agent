@@ -157,7 +157,9 @@ class LcmContextEngine(ContextEngine):
 
         # Check if compaction should fire
         action = self._engine.check_thresholds()
-        if action != CompactionAction.NONE:
+        if action == CompactionAction.ASYNC:
+            self._engine.async_compact()
+        elif action == CompactionAction.BLOCKING:
             self._engine.auto_compact()
             self.compression_count += 1
 
