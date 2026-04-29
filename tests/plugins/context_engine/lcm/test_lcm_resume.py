@@ -168,3 +168,101 @@ class TestIngestedCountAfterRebuild:
 # Fix B — preserve raw message ids across save/rebuild after lcm_focus
 # ---------------------------------------------------------------------------
 
+class TestRawIdPreservationAfterFocus:
+    """Raw message ids must survive serialization even when active is non-contiguous
+    (i.e. after focus_summary splices original raw entries back into active)."""
+
+    def _build_focused_engine(self) -> LcmEngine:
+        """Build an engine where active[5].msg_id == 5 after focus."""
+        config = LcmConfig(enabled=True, protect_last_n=2)
+        engine = LcmEngine(config)
+        # Ingest 51 messages
+        for i in range(51):
+            role = "user" if i % 2 == 0 else "assistant"
+            engine.ingest({"role": role, "content": f"msg {i}"})
+
+        # Compact messages [0..20] into a summary
+        block = engine.find_compactable_block()
+        assert block is not None, "Expected a compactable block"
+        node = engine.compact("summary of early msgs", level=1, block_start=block[0], block_end=block[1])
+
+        # Expand the summary back (focus) — this makes active non-contiguous
+        ok = engine.focus_summary(node.id)
+        assert ok, "focus_summary should succeed"
+
+        return engine
+
+    def test_focused_engine_msg_ids_match_store_positions(self):
+        """After focus_summary, each raw entry's msg_id must match its store index."""
+        engine = self._build_focused_engine()
+        for entry in engine.active:
+            if entry.kind == "raw":
+                assert entry.msg_id is not None
+                msg = engine.store.get(entry.msg_id)
+                assert msg is not None, f"msg_id {entry.msg_id} not found in store"
+                # The message content must match
+                assert entry.message["content"] == msg["content"]
+
+    def test_active_position_5_msg_id_preserved_after_rebuild(self):
+        """After save+rebuild, engine.active[5].msg_id equals the original id."""
+        engine = self._build_focused_engine()
+
+        # Record the msg_id at position 5 before serialization
+        original_msg_id = engine.active[5].msg_id
+        assert original_msg_id is not None
+
+        session_data = _build_session_data(engine)
+        config = LcmConfig(enabled=True, protect_last_n=2)
+        rebuilt = LcmEngine.rebuild_from_session(session_data, config)
+
+        assert rebuilt.active[5].msg_id == original_msg_id, (
+            f"msg_id at position 5 changed from {original_msg_id} "
+            f"to {rebuilt.active[5].msg_id} after rebuild"
+        )
+
+    def test_lcm_pin_after_rebuild_affects_correct_store_row(self):
+        """pin() on active[5] after rebuild must mark the same store id
+        that was originally at position 5, not a reassigned one."""
+        engine = self._build_focused_engine()
+        original_msg_id_5 = engine.active[5].msg_id
+        assert original_msg_id_5 is not None
+
+        session_data = _build_session_data(engine)
+        config = LcmConfig(enabled=True, protect_last_n=2)
+        rebuilt = LcmEngine.rebuild_from_session(session_data, config)
+
+        rebuilt.pin([rebuilt.active[5].msg_id])
+        assert original_msg_id_5 in rebuilt._pinned_ids, (
+            f"Pinned msg_id {rebuilt.active[5].msg_id} but original was {original_msg_id_5}"
+        )
+
+    def test_rebuild_without_lcm_raw_id_falls_back_gracefully(self):
+        """Sessions saved WITHOUT _lcm_raw_id (legacy) still rebuild correctly
+        for the simple contiguous-suffix case."""
+        config = LcmConfig(enabled=True, protect_last_n=2)
+        # Build a fresh session_data without any _lcm_raw_id keys
+        original_messages = [
+            {"role": "user", "content": f"msg {i}"}
+            for i in range(5)
+        ]
+        # active messages: 1 summary + 2 raw (no _lcm_raw_id keys)
+        active_messages = [
+            {"role": "user", "content": "[Summary]", "_lcm_summary": True, "_lcm_node_id": 0},
+            {"role": "user", "content": "msg 3"},
+            {"role": "assistant", "content": "msg 4"},
+        ]
+        summaries = [
+            {"node_id": 0, "source_ids": [0, 1, 2], "text": "Early msgs", "level": 1, "tokens": 30}
+        ]
+        session_data = {
+            "messages": active_messages,
+            "lcm": {
+                "summaries": summaries,
+                "original_messages": original_messages,
+            }
+        }
+        rebuilt = LcmEngine.rebuild_from_session(session_data, config)
+        # Raw entries [1] and [2] map to store positions 3 and 4 (suffix fallback)
+        assert rebuilt.active[1].kind == "raw"
+        assert rebuilt.active[1].msg_id == 3
+        assert rebuilt.active[2].msg_id == 4

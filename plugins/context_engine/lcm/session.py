@@ -66,6 +66,7 @@ class LcmSessionMixin:
             )
 
         if original_messages:
+            # Compute suffix-offset fallback for legacy sessions (no _lcm_raw_id)
             raw_in_active = sum(1 for m in messages if not m.get("_lcm_summary"))
             next_raw_id = len(engine.store) - raw_in_active
         else:
@@ -77,11 +78,20 @@ class LcmSessionMixin:
                 engine.active.append(ContextEntry.summary(node_id, msg))
             else:
                 if original_messages:
-                    msg_id = next_raw_id
-                    next_raw_id += 1
+                    # Prefer the embedded id written by active_messages_for_session().
+                    # Fall back to the suffix-offset formula for sessions saved before
+                    # this fix was deployed (backward compatibility).
+                    if "_lcm_raw_id" in msg:
+                        msg_id = msg["_lcm_raw_id"]
+                    else:
+                        msg_id = next_raw_id
+                        next_raw_id += 1
                 else:
                     msg_id = engine.store.append(msg)
-                engine.active.append(ContextEntry.raw(msg_id, msg))
+                # Strip the internal annotation before storing in active (it's
+                # only meaningful for serialization, not at runtime).
+                clean_msg = {k: v for k, v in msg.items() if k != "_lcm_raw_id"}
+                engine.active.append(ContextEntry.raw(msg_id, clean_msg))
 
         pinned_ids = lcm_meta.get("pinned") or []
         store_size = len(engine.store)
@@ -121,6 +131,26 @@ class LcmSessionMixin:
         )
 
         return engine
+
+    def active_messages_for_session(self) -> list[dict]:
+        """Return active message dicts annotated for session persistence.
+
+        Raw entries receive a ``_lcm_raw_id`` key so their store position can
+        be restored exactly on rebuild, even when the active list is
+        non-contiguous (e.g. after ``focus_summary`` pulls expanded entries
+        back in).  Summary entries already carry ``_lcm_summary`` /
+        ``_lcm_node_id`` markers set at compaction time and are returned as-is.
+        """
+        result = []
+        for entry in self.active:
+            if entry.kind == "raw" and entry.msg_id is not None:
+                # Shallow-copy to avoid mutating the live message dict
+                annotated = dict(entry.message)
+                annotated["_lcm_raw_id"] = entry.msg_id
+                result.append(annotated)
+            else:
+                result.append(entry.message)
+        return result
 
     def to_session_metadata(self) -> dict:
         """Serialize engine state for session JSON persistence."""
