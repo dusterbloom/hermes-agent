@@ -247,6 +247,10 @@ class RlmContextEngine(ContextEngine):
 
         This is called by the agent so the RLM engine can populate
         its context with the actual conversation.
+
+        Handles both Anthropic-style content blocks
+        (``content: [{type: tool_use, ...}]``) and OpenAI-style
+        ``tool_calls: [{function: {name, arguments}}]`` on assistant messages.
         """
         parts = []
         for msg in messages:
@@ -261,6 +265,17 @@ class RlmContextEngine(ContextEngine):
                             parts.append(f"[{role}]: {item['text']}")
                         elif item.get("type") == "tool_use":
                             parts.append(f"[{role}]: {json.dumps(item.get('input', {}))}")
+            # OpenAI-style: tool_calls=[{function: {name, arguments}}]
+            # These appear alongside empty/null content on assistant messages.
+            tool_calls = msg.get("tool_calls")
+            if tool_calls and isinstance(tool_calls, list):
+                for tc in tool_calls:
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    if fn:
+                        parts.append(
+                            f"[{role}]: tool_call {fn.get('name', '?')} "
+                            f"{fn.get('arguments', '')}"
+                        )
         return "\n\n".join(parts)
 
     def refresh_context(self, messages: List[Dict[str, Any]]) -> None:
