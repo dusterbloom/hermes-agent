@@ -79,12 +79,12 @@ class TestAbcCompliance:
         engine = LcmContextEngine()
         schemas = engine.get_tool_schemas()
         assert isinstance(schemas, list)
-        assert len(schemas) == 7
         names = {s["name"] for s in schemas}
-        assert names == {
+        assert {
             "lcm_expand", "lcm_pin", "lcm_forget",
             "lcm_search", "lcm_budget", "lcm_toc", "lcm_focus",
-        }
+        }.issubset(names)
+        assert any(n.startswith("memory_") for n in names)
 
     def test_handle_tool_call_valid(self):
         engine = LcmContextEngine()
