@@ -185,6 +185,15 @@ class LcmContextEngine(ContextEngine):
         # Return the engine's active message list
         result = self._engine.active_messages()
 
+        # After compaction the active list is shorter than the original input.
+        # run_agent uses `result` as the new messages list for the next
+        # iteration, so the cursor must track *that* length.  Without this,
+        # the next compress() call computes new_count = len(result_next) -
+        # len(messages_original), which can be negative and silently skips
+        # fresh turns until the conversation re-grows past the old length.
+        if action in (CompactionAction.ASYNC, CompactionAction.BLOCKING):
+            self._ingested_count = len(result)
+
         # Update token tracking
         active_tokens = self._engine.active_tokens()
         self.last_prompt_tokens = active_tokens
