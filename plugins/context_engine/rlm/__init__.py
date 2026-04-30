@@ -399,6 +399,15 @@ class RlmContextEngine(ContextEngine):
         chunk_size = args.get("chunk_size", 8000)
         overlap = args.get("overlap", 500)
 
+        # Reject malformed bounds before entering the loop.  overlap >= chunk_size
+        # causes start to not advance (or move backwards), producing an infinite loop.
+        if not isinstance(chunk_size, int) or chunk_size <= 0:
+            return json.dumps({"error": f"chunk_size must be a positive integer, got {chunk_size!r}"})
+        if not isinstance(overlap, int) or overlap < 0:
+            return json.dumps({"error": f"overlap must be a non-negative integer, got {overlap!r}"})
+        if overlap >= chunk_size:
+            return json.dumps({"error": f"overlap ({overlap}) must be smaller than chunk_size ({chunk_size})"})
+
         try:
             context = self._session_context
             chunks = []
@@ -609,10 +618,12 @@ RLM_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "chunk_size": {
                     "type": "integer",
                     "description": "Characters per chunk. Default: 8000",
+                    "minimum": 1,
                 },
                 "overlap": {
                     "type": "integer",
-                    "description": "Characters of overlap between chunks. Default: 500",
+                    "description": "Characters of overlap between chunks. Must be less than chunk_size. Default: 500",
+                    "minimum": 0,
                 },
             },
             "required": [],
