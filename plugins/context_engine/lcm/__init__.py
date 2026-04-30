@@ -237,6 +237,11 @@ class LcmContextEngine(ContextEngine):
                 # reads the user-supplied thresholds (tau_soft, tau_hard, etc.)
                 # rather than the constructor-time defaults.
                 self._engine.config = self._config
+                # Re-sync the live Summarizer's model so a config.yaml change to
+                # lcm.summary_model reaches the already-constructed instance.
+                # summarizer.config.model is the field that _try_llm_summarize reads.
+                if self._config.summary_model:
+                    self._engine.summarizer.config.model = self._config.summary_model
         except Exception:
             pass  # Config not available, use defaults
 
