@@ -1914,8 +1914,12 @@ class AIAgent:
         except Exception:
             pass
 
-        # Load plugin engine(s)
-        if _engine_name == "compressor" or _engine_name not in ("lcm", "rlm"):
+        # Load plugin engine(s).
+        # Default: any engine name is loaded via load_context_engine(name).
+        # Special cases: "compressor" uses the built-in; "rlm" is standalone.
+        # "lcm" (and any other compression engine) also supports the composite
+        # path when _rlm_enabled is True.
+        if _engine_name == "compressor":
             # Explicitly using built-in compressor (default)
             pass
         elif _engine_name == "rlm":
@@ -1926,7 +1930,8 @@ class AIAgent:
             except Exception as _ce_load_err:
                 logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
         else:
-            # LCM or other engine name — check if RLM companion is requested
+            # Generic: lcm, or any plugin engine under plugins/context_engine/<name>/.
+            # Also supports composite mode (engine + RLM) when _rlm_enabled is True.
             rlm_kwargs = {}
             rlm_config = _ctx_cfg.get("rlm_config", {})
             rlm_kwargs["rlm_config"] = rlm_config
