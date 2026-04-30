@@ -258,3 +258,43 @@ class TestDisabledAtConstructionTimeViaLcmConfig:
             "load_context_engine with enabled=True returned no schemas; "
             "enabled engines must expose their tools"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix: summarizer model must be re-synced when config reloads in on_session_start
+# ---------------------------------------------------------------------------
+
+class TestSummarizerModelPropagation:
+    """After on_session_start reloads config, the live Summarizer must pick up
+    the new lcm.summary_model value instead of keeping its constructor-time model.
+    """
+
+    def test_summary_model_propagated_on_session_start(self):
+        """engine._engine.summarizer.config.model reflects the reloaded summary_model."""
+        engine = LcmContextEngine()
+        # Confirm the summarizer starts with no forced model (empty string default)
+        assert engine._engine.summarizer.config.model != "custom-model-x"
+
+        fake_cfg = {"lcm": {"summary_model": "custom-model-x"}}
+        with patch("hermes_cli.config.load_config", return_value=fake_cfg):
+            engine.on_session_start("s1")
+
+        assert engine._engine.summarizer.config.model == "custom-model-x", (
+            f"summarizer.config.model={engine._engine.summarizer.config.model!r} "
+            "but expected 'custom-model-x' — summary_model not re-synced after config reload"
+        )
+
+    def test_summary_model_not_overwritten_when_not_set(self):
+        """When config reloads without summary_model, the summarizer keeps its current model."""
+        engine = LcmContextEngine()
+        # Manually set a model to verify it isn't wiped by a config without summary_model
+        engine._engine.summarizer.config.model = "pre-set-model"
+
+        fake_cfg = {"lcm": {"tau_soft": "0.55"}}  # no summary_model key
+        with patch("hermes_cli.config.load_config", return_value=fake_cfg):
+            engine.on_session_start("s2")
+
+        # summary_model is falsy (empty string) so the branch must NOT overwrite
+        assert engine._engine.summarizer.config.model == "pre-set-model", (
+            "summarizer.config.model was overwritten despite no summary_model in config"
+        )
