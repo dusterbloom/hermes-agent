@@ -178,6 +178,9 @@ class LcmContextEngine(ContextEngine):
         action = self._engine.check_thresholds()
         if action == CompactionAction.ASYNC:
             self._engine.async_compact()
+            # Count when scheduled so the status display reflects "X compactions
+            # triggered" for both async and blocking paths, not just blocking ones.
+            self.compression_count += 1
         elif action == CompactionAction.BLOCKING:
             self._engine.auto_compact()
             self.compression_count += 1
