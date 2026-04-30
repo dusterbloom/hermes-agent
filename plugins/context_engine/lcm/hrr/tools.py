@@ -84,8 +84,12 @@ def handle_memory_search(args: dict[str, Any]) -> str:
         except Exception as exc:
             logger.warning("HRR search failed, falling back: %s", exc)
 
-    # Layer 3: Keyword fallback (LCM store linear scan)
-    if not results:
+    # Layer 3: Keyword fallback (LCM store linear scan).
+    # Only used for source="auto" or source="session".  When the caller
+    # explicitly requests source="memory" (cross-session HRR only) we must
+    # not fall back to the in-session store — that would leak session content
+    # into what the caller expects to be persistent-memory results.
+    if not results and source != "memory":
         try:
             from plugins.context_engine.lcm.tools import handle_lcm_search
 
