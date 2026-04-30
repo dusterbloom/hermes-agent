@@ -694,3 +694,104 @@ class TestBuildContextFromMessages:
         assert "Paris" in context, (
             f"Tool arguments missing from flattened context.\nContext:\n{context}"
         )
+
+
+# ── Partition Bounds Validation Tests ───────────────────────────────────
+
+
+class TestRlmPartitionBoundsValidation:
+    """Regression tests for _handle_partition() infinite-loop guard.
+
+    With overlap >= chunk_size the loop variable 'start' does not advance
+    (or moves backwards), causing an infinite loop.  The fix rejects
+    malformed bounds before entering the loop and returns a descriptive
+    error JSON instead of hanging.
+    """
+
+    def _engine_with_context(self, text: str = "A" * 10000) -> "RlmContextEngine":
+        engine = RlmContextEngine()
+        engine._session_context = text
+        engine._rlm_env = RLMAgentEnvironment(text)
+        return engine
+
+    def test_overlap_equal_to_chunk_size_returns_error(self):
+        """overlap == chunk_size must not loop; must return error JSON."""
+        engine = self._engine_with_context()
+        result = engine.handle_tool_call(
+            "rlm_partition", {"chunk_size": 500, "overlap": 500}
+        )
+        data = json.loads(result)
+        assert "error" in data, f"Expected error JSON, got: {data}"
+        assert "overlap" in data["error"].lower() or "chunk_size" in data["error"].lower()
+
+    def test_overlap_greater_than_chunk_size_returns_error(self):
+        """overlap > chunk_size is even worse; must return error JSON."""
+        engine = self._engine_with_context()
+        result = engine.handle_tool_call(
+            "rlm_partition", {"chunk_size": 100, "overlap": 200}
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_chunk_size_zero_returns_error(self):
+        """chunk_size=0 must return error JSON."""
+        engine = self._engine_with_context()
+        result = engine.handle_tool_call(
+            "rlm_partition", {"chunk_size": 0, "overlap": 0}
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "chunk_size" in data["error"]
+
+    def test_chunk_size_negative_returns_error(self):
+        """chunk_size=-1 must return error JSON."""
+        engine = self._engine_with_context()
+        result = engine.handle_tool_call(
+            "rlm_partition", {"chunk_size": -1, "overlap": 0}
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_overlap_negative_returns_error(self):
+        """Negative overlap is invalid; must return error JSON."""
+        engine = self._engine_with_context()
+        result = engine.handle_tool_call(
+            "rlm_partition", {"chunk_size": 1000, "overlap": -1}
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_valid_inputs_still_work(self):
+        """Sanity check: valid chunk_size=1000, overlap=100 must succeed."""
+        engine = self._engine_with_context("B" * 5000)
+        result = engine.handle_tool_call(
+            "rlm_partition", {"chunk_size": 1000, "overlap": 100}
+        )
+        data = json.loads(result)
+        assert "error" not in data, f"Unexpected error for valid inputs: {data}"
+        assert data["total_chunks"] > 0
+        assert data["chunk_size"] == 1000
+        assert data["overlap"] == 100
+
+    def test_zero_overlap_is_valid(self):
+        """overlap=0 (no overlap) is a valid configuration."""
+        engine = self._engine_with_context("C" * 3000)
+        result = engine.handle_tool_call(
+            "rlm_partition", {"chunk_size": 1000, "overlap": 0}
+        )
+        data = json.loads(result)
+        assert "error" not in data
+        assert data["total_chunks"] == 3
+
+    def test_partition_schema_has_minimum_constraints(self):
+        """JSON schema for rlm_partition must declare minimum values."""
+        engine = RlmContextEngine()
+        schemas = engine.get_tool_schemas()
+        partition_schema = next(s for s in schemas if s["name"] == "rlm_partition")
+        props = partition_schema["parameters"]["properties"]
+        assert props["chunk_size"].get("minimum") == 1, (
+            "chunk_size schema is missing 'minimum: 1'"
+        )
+        assert props["overlap"].get("minimum") == 0, (
+            "overlap schema is missing 'minimum: 0'"
+        )
