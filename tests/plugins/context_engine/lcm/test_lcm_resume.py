@@ -3,6 +3,10 @@
 Fix A: _ingested_count must track input-message count, not active-entry count.
 Fix B: raw message ids must be preserved across save/rebuild when active list
        contains non-contiguous raw entries (e.g. after lcm_focus).
+Fix 1: HRR store and DAM retriever must be re-attached after engine rebuild so
+       resumed sessions retain L2/L3 memory layers.
+Fix 3: Legacy session files (no lcm.original_messages) must seed _ingested_count
+       from store size to prevent re-ingestion on next compress() call.
 """
 from __future__ import annotations
 
@@ -355,3 +359,90 @@ class TestCompressionRolloverPreservesIngestedCount:
         assert len(outer._engine.active) == active_size_before, (
             "Engine active list was reset during compression rollover"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — HRR store and DAM retriever must survive engine rebuild
+# ---------------------------------------------------------------------------
+
+class TestHrrAndDamReattachedAfterRebuild:
+    """After on_session_start() rebuilds the engine from a session file, the fresh
+    LcmEngine instance must have hrr_store (L3) and retriever (L2) re-attached.
+
+    Without the fix, rebuild_from_session() returns a plain LcmEngine with no
+    hrr_store / retriever, so all cross-session and per-session memory is lost.
+    """
+
+    def _save_and_reload(self, messages_n: int, tmpdir: str, session_id: str):
+        """Helper: build engine, compress messages, save, reload via on_session_start."""
+        import json
+        import pathlib
+
+        config = LcmConfig(enabled=True, protect_last_n=2)
+        outer = LcmContextEngine(lcm_config=config)
+        msgs = _make_messages(messages_n)
+        outer.compress(msgs)
+
+        session_data = _build_session_data(outer._engine)
+        session_file = (
+            pathlib.Path(tmpdir) / "sessions" / f"session_{session_id}.json"
+        )
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        session_file.write_text(json.dumps(session_data), encoding="utf-8")
+
+        new_outer = LcmContextEngine(lcm_config=config)
+        new_outer.on_session_start(session_id, hermes_home=tmpdir)
+        return new_outer
+
+    def test_hrr_store_reattached_after_rebuild(self):
+        """engine._engine.hrr_store must not be None after session resume."""
+        import tempfile
+
+        # Only meaningful when HRR sub-package is available; skip otherwise
+        try:
+            from plugins.context_engine.lcm.hrr.store import MemoryStore as _M
+        except (ImportError, Exception):
+            pytest.skip("HRR sub-package not installed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            new_outer = self._save_and_reload(20, tmpdir, "session-hrr-reattach")
+
+        assert hasattr(new_outer._engine, "hrr_store"), (
+            "engine._engine has no hrr_store attribute after rebuild"
+        )
+        assert new_outer._engine.hrr_store is not None, (
+            "engine._engine.hrr_store is None after rebuild — HRR store was dropped"
+        )
+
+    def test_dam_retriever_reattached_after_rebuild(self):
+        """engine._engine.retriever must not be None after session resume."""
+        import tempfile
+
+        # Only meaningful when DAM sub-package is available; skip otherwise
+        try:
+            from plugins.context_engine.lcm.dam import DAMRetriever as _D
+        except (ImportError, Exception):
+            pytest.skip("DAM sub-package not installed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            new_outer = self._save_and_reload(20, tmpdir, "session-dam-reattach")
+
+        assert hasattr(new_outer._engine, "retriever"), (
+            "engine._engine has no retriever attribute after rebuild"
+        )
+        assert new_outer._engine.retriever is not None, (
+            "engine._engine.retriever is None after rebuild — DAM retriever was dropped"
+        )
+
+    def test_fresh_session_no_file_still_has_hrr_and_dam(self):
+        """Baseline: a brand-new engine (no session file) has hrr_store and retriever."""
+        try:
+            from plugins.context_engine.lcm.hrr.store import MemoryStore as _M
+            from plugins.context_engine.lcm.dam import DAMRetriever as _D
+        except (ImportError, Exception):
+            pytest.skip("HRR or DAM sub-package not installed")
+
+        config = LcmConfig(enabled=True)
+        outer = LcmContextEngine(lcm_config=config)
+        assert hasattr(outer._engine, "hrr_store") and outer._engine.hrr_store is not None
+        assert hasattr(outer._engine, "retriever") and outer._engine.retriever is not None

@@ -244,6 +244,17 @@ class LcmContextEngine(ContextEngine):
                         provider=self._engine.provider,
                         context_length=self.context_length,
                     )
+                    # Re-attach L3 HRR store — rebuild() returns a fresh LcmEngine
+                    # that has no hrr_store; without this, resumed sessions lose all
+                    # cross-session memory (same root cause as config not propagating
+                    # after rebuild, fixed in round-3).
+                    try:
+                        from plugins.context_engine.lcm.hrr.store import MemoryStore as _HrrStore
+                        self._engine.hrr_store = _HrrStore()
+                    except (ImportError, Exception):
+                        pass
+                    # Re-attach L2 DAM retriever for the same reason.
+                    self._try_init_dam()
                     # Sync ingested count to the number of input messages that were
                     # originally fed into this engine instance.  Using active list
                     # length would be wrong: after compaction the active list is
