@@ -16,6 +16,8 @@ load_context_engine(_engine_name, ...).
 """
 
 import json
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 
@@ -115,3 +117,87 @@ class TestEngineDispatch:
         assert mock_composite_load.call_args[1]["compression_name"] == "custom"
         mock_plain_load.assert_not_called()  # composite succeeded, no fallback needed
         assert result is mock_composite
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — loader filters kwargs by engine signature to avoid TypeError
+# ---------------------------------------------------------------------------
+
+class TestKwargsFiltering:
+    """_load_engine_from_dir must not pass kwargs that the engine's register()
+    does not declare, avoiding TypeError on custom engines.
+
+    Approach A (inspect.signature): only kwargs in the explicit parameter list
+    are forwarded; if register() has a **kwargs catch-all, everything passes.
+    """
+
+    def _make_fake_engine_module(self, register_fn, mod_name: str = "fake_engine"):
+        """Build a throwaway module with the given register function."""
+        from agent.context_engine import ContextEngine
+        mod = types.ModuleType(mod_name)
+        mod.register = register_fn
+        return mod
+
+    def test_register_no_kwargs_does_not_raise(self):
+        """A register(ctx) with no kwargs must not receive rlm_config / lcm_config."""
+        received = {}
+
+        def register(ctx):
+            # If any kwargs were forwarded this call would raise TypeError
+            received["called"] = True
+            from agent.context_engine import ContextEngine
+            class _E(ContextEngine):
+                @property
+                def name(self): return "fake"
+                def compress(self, m, **k): return m
+                def should_compress(self, p=None): return False
+                def should_compress_preflight(self, m): return False
+                def get_tool_schemas(self): return []
+                def handle_tool_call(self, n, a, **k): return "{}"
+            ctx.register_context_engine(_E())
+
+        from plugins.context_engine import _load_engine_from_dir, _filter_kwargs
+        import inspect
+
+        # Verify _filter_kwargs strips unknown keys
+        sig = inspect.signature(register)
+        filtered = _filter_kwargs({"rlm_config": {}, "lcm_config": {}}, sig)
+        assert filtered == {}, (
+            f"_filter_kwargs should strip all kwargs from a no-kwargs register(); got {filtered!r}"
+        )
+
+    def test_register_explicit_lcm_config_receives_only_lcm_config(self):
+        """register(ctx, lcm_config=None) must receive lcm_config but not rlm_config."""
+        from plugins.context_engine import _filter_kwargs
+        import inspect
+
+        def register(ctx, lcm_config=None):
+            pass
+
+        sig = inspect.signature(register)
+        filtered = _filter_kwargs({"rlm_config": {"x": 1}, "lcm_config": {"enabled": False}}, sig)
+        assert "lcm_config" in filtered, "lcm_config should pass through to a register that declares it"
+        assert "rlm_config" not in filtered, "rlm_config should be stripped from a register that doesn't declare it"
+
+    def test_register_with_var_keyword_receives_all_kwargs(self):
+        """register(ctx, **kwargs) must receive everything — the VAR_KEYWORD check."""
+        from plugins.context_engine import _filter_kwargs
+        import inspect
+
+        def register(ctx, **kwargs):
+            pass
+
+        sig = inspect.signature(register)
+        all_kwargs = {"rlm_config": {}, "lcm_config": {"enabled": True}, "model": "gpt-4"}
+        filtered = _filter_kwargs(all_kwargs, sig)
+        assert filtered == all_kwargs, (
+            "register(**kwargs) should receive all kwargs unchanged"
+        )
+
+    def test_load_context_engine_lcm_with_rlm_config_no_error(self):
+        """load_context_engine('lcm', rlm_config={...}, lcm_config={...}) must not
+        raise TypeError — lcm's register() accepts **kwargs so all pass through."""
+        from plugins.context_engine import load_context_engine
+        engine = load_context_engine("lcm", rlm_config={"max_iterations": 5}, lcm_config={"enabled": True})
+        assert engine is not None, "load_context_engine should return an LcmContextEngine"
+        assert engine.name == "lcm"
