@@ -438,3 +438,72 @@ class TestToolHandlers:
         assert node is not None
         result = handle_lcm_focus({"node_id": node.id})
         assert "focus" in result.lower() or str(node.id) in result
+
+
+# ---------------------------------------------------------------------------
+# Fix: async_compact() must bump compression_count same as auto_compact()
+# ---------------------------------------------------------------------------
+
+class TestAsyncCompactionCount:
+    """compression_count must increment when ASYNC compaction is triggered.
+
+    Previously only BLOCKING incremented the counter, so the status display
+    showed zero compactions even after async background compactions fired.
+    """
+
+    def test_compression_count_increments_on_async(self):
+        """ASYNC compaction path must bump compression_count."""
+        from unittest.mock import MagicMock, patch
+        from plugins.context_engine.lcm import LcmContextEngine
+        from plugins.context_engine.lcm.engine import CompactionAction
+
+        # tau_soft=0.5, tau_hard=0.99 — ASYNC fires between 50% and 99%.
+        adapter = LcmContextEngine(
+            lcm_config={"tau_soft": 0.5, "tau_hard": 0.99, "protect_last_n": 2},
+            context_length=500,
+        )
+        # Mock summarizer to avoid LLM calls
+        adapter._engine.summarizer.summarize = MagicMock(
+            return_value="MOCK SUMMARY: async compaction test."
+        )
+        # Mock async_compact to be a no-op (we just want to verify the counter)
+        adapter._engine.async_compact = MagicMock()
+
+        # Force check_thresholds to return ASYNC
+        with patch.object(
+            adapter._engine, "check_thresholds", return_value=CompactionAction.ASYNC
+        ):
+            # Supply some messages — content doesn't matter since thresholds are mocked
+            messages = [{"role": "user", "content": f"msg {i}"} for i in range(5)]
+            adapter.compress(messages)
+
+        assert adapter.compression_count >= 1, (
+            f"compression_count={adapter.compression_count} after ASYNC compaction; "
+            "expected >= 1 — async_compact() must increment the counter"
+        )
+        adapter._engine.async_compact.assert_called_once()
+
+    def test_blocking_count_unchanged(self):
+        """BLOCKING compaction still increments compression_count (regression guard)."""
+        from unittest.mock import MagicMock, patch
+        from plugins.context_engine.lcm import LcmContextEngine
+        from plugins.context_engine.lcm.engine import CompactionAction
+
+        adapter = LcmContextEngine(
+            lcm_config={"tau_soft": 0.5, "tau_hard": 0.9, "protect_last_n": 2},
+            context_length=500,
+        )
+        adapter._engine.summarizer.summarize = MagicMock(
+            return_value="MOCK SUMMARY: blocking test."
+        )
+        adapter._engine.auto_compact = MagicMock(return_value=None)
+
+        with patch.object(
+            adapter._engine, "check_thresholds", return_value=CompactionAction.BLOCKING
+        ):
+            messages = [{"role": "user", "content": f"msg {i}"} for i in range(5)]
+            adapter.compress(messages)
+
+        assert adapter.compression_count >= 1, (
+            f"compression_count={adapter.compression_count} after BLOCKING compaction"
+        )
