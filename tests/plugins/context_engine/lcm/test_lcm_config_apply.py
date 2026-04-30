@@ -203,3 +203,58 @@ class TestDisabledFlagOnConfigReload:
             f"_disabled={engine._disabled!r} after reloading enabled=True; "
             "expected False"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 6 — lcm_config passed to constructor so disabled mode suppresses tools
+#          at registration time (before on_session_start is ever called)
+# ---------------------------------------------------------------------------
+
+class TestDisabledAtConstructionTimeViaLcmConfig:
+    """lcm_config passed to LcmContextEngine at construction time must suppress
+    tool registration immediately — no on_session_start() call required.
+
+    Regression: previously the engine was constructed with default kwargs (enabled=True),
+    then on_session_start() would re-evaluate _disabled.  This meant get_tool_schemas()
+    returned non-empty tools between construction and the first on_session_start call.
+    """
+
+    def test_get_tool_schemas_empty_before_session_start(self):
+        """Tools must be suppressed purely from constructor kwargs, before any session."""
+        engine = LcmContextEngine(lcm_config={"enabled": False})
+        # Do NOT call on_session_start — that was the previous dependency
+        schemas = engine.get_tool_schemas()
+        assert schemas == [], (
+            f"get_tool_schemas() returned {len(schemas)} schemas before any "
+            "on_session_start() call; disabled mode must suppress tools at construction"
+        )
+
+    def test_disabled_flag_set_at_construction(self):
+        """_disabled=True must be set immediately in __init__ from lcm_config."""
+        engine = LcmContextEngine(lcm_config={"enabled": False})
+        assert engine._disabled is True, (
+            "_disabled should be True immediately after construction with enabled=False"
+        )
+
+    def test_load_context_engine_with_lcm_config_disabled(self):
+        """load_context_engine('lcm', lcm_config={'enabled': False}) must return
+        an engine whose get_tool_schemas() is empty without any session lifecycle call."""
+        from plugins.context_engine import load_context_engine
+        engine = load_context_engine("lcm", lcm_config={"enabled": False})
+        assert engine is not None, "load_context_engine should return an engine instance"
+        schemas = engine.get_tool_schemas()
+        assert schemas == [], (
+            f"load_context_engine with enabled=False returned {len(schemas)} schemas; "
+            "expected [] — lcm_config must be forwarded through the loader to the constructor"
+        )
+
+    def test_load_context_engine_with_lcm_config_enabled(self):
+        """Sanity: load_context_engine('lcm', lcm_config={'enabled': True}) must expose tools."""
+        from plugins.context_engine import load_context_engine
+        engine = load_context_engine("lcm", lcm_config={"enabled": True})
+        assert engine is not None
+        schemas = engine.get_tool_schemas()
+        assert len(schemas) > 0, (
+            "load_context_engine with enabled=True returned no schemas; "
+            "enabled engines must expose their tools"
+        )

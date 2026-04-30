@@ -1914,6 +1914,16 @@ class AIAgent:
         except Exception:
             pass
 
+        # Read lcm config section BEFORE constructing the engine.
+        # This ensures that lcm.enabled=false suppresses tool registration
+        # at construction time rather than waiting for on_session_start().
+        _lcm_cfg: dict = {}
+        try:
+            if isinstance(_agent_cfg, dict):
+                _lcm_cfg = _agent_cfg.get("lcm", {}) or {}
+        except Exception:
+            pass
+
         # Load plugin engine(s).
         # Default: any engine name is loaded via load_context_engine(name).
         # Special cases: "compressor" uses the built-in; "rlm" is standalone.
@@ -1935,6 +1945,10 @@ class AIAgent:
             rlm_kwargs = {}
             rlm_config = _ctx_cfg.get("rlm_config", {})
             rlm_kwargs["rlm_config"] = rlm_config
+            # Pass lcm_config only for the lcm engine so custom engines whose
+            # register() does not accept lcm_config don't receive it here.
+            if _engine_name == "lcm":
+                rlm_kwargs["lcm_config"] = _lcm_cfg
 
             if _rlm_enabled:
                 # Composite mode: LCM + RLM
@@ -1955,7 +1969,7 @@ class AIAgent:
                     from plugins.context_engine import load_context_engine
                     _selected_engine = load_context_engine(
                         _engine_name,
-                        rlm_config=rlm_kwargs.get("rlm_config"),
+                        **rlm_kwargs,
                     )
                 except Exception as _ce_load_err:
                     logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
