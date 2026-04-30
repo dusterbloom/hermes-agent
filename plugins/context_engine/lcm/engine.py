@@ -343,24 +343,66 @@ class LcmEngine(LcmQueryMixin, LcmFormatMixin, LcmSessionMixin):
 
         return (start, end)
 
-    def _retreat_from_tool_result(self, start: int, end: int) -> int | None:
-        """Retreat `end` so the block does not end mid-pair.
+    @staticmethod
+    def _has_tool_calls(message: dict[str, Any]) -> bool:
+        """Return True if *message* carries tool-call requests.
 
-        A "tool" role message must be immediately preceded (in the block) by
-        the assistant message carrying its tool_calls. If the proposed end
-        would cut between the assistant-with-tool_calls and the tool result,
-        we pull end back to exclude that pair entirely.
+        Handles both formats used in this codebase:
+        - OpenAI-style: top-level ``tool_calls`` list.
+        - Anthropic-style: ``content`` is a list with at least one item whose
+          ``type`` is ``"tool_use"``.
+        """
+        if message.get("tool_calls"):
+            return True
+        content = message.get("content")
+        if isinstance(content, list):
+            return any(
+                isinstance(block, dict) and block.get("type") == "tool_use"
+                for block in content
+            )
+        return False
+
+    def _retreat_from_tool_result(self, start: int, end: int) -> int | None:
+        """Retreat ``end`` so the block does not end mid tool-call/result pair.
+
+        Two cases to guard against:
+
+        1. The block's last entry is a ``tool`` role message whose paired
+           ``assistant+tool_calls`` is *not* inside the block (it would be left
+           orphaned in the protected tail).  Back off until the pair is either
+           both inside the block or both outside.
+
+        2. The block's last entry is an ``assistant`` message that carries
+           ``tool_calls`` *and* the first entry of the protected tail (i.e.
+           ``self.active[end]``) is a ``tool`` result for that call.  Compacting
+           the assistant away would leave an orphan ``tool`` message at the
+           start of the tail.  Back off by 1 (and repeat so rule 1 is
+           re-checked for the new boundary).
         """
         while end > start:
             last_entry = self.active[end - 1]
-            if last_entry.message.get("role") == "tool":
+            last_msg = last_entry.message
+
+            # Rule 1: block ends with a bare tool-result — its paired
+            # tool_calls must also be in the block.
+            if last_msg.get("role") == "tool":
                 if end - 1 > start:
                     preceding = self.active[end - 2]
-                    if preceding.message.get("tool_calls"):
-                        break
+                    if self._has_tool_calls(preceding.message):
+                        break  # pair is intact inside the block
                 end -= 1
-            else:
-                break
+                continue
+
+            # Rule 2: block ends with an assistant+tool_calls whose result
+            # sits in the protected tail.
+            if self._has_tool_calls(last_msg) and end < len(self.active):
+                next_entry = self.active[end]
+                if next_entry.message.get("role") == "tool":
+                    end -= 1
+                    continue
+
+            break
+
         return end if end > start else None
 
     # ------------------------------------------------------------------
