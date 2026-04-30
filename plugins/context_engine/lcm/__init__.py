@@ -229,6 +229,10 @@ class LcmContextEngine(ContextEngine):
                 self._config = LcmConfig.from_dict(_lcm_cfg)
                 self.threshold_percent = self._config.tau_soft
                 self.protect_last_n = self._config.protect_last_n
+                # Re-evaluate _disabled so a config change (e.g. lcm.enabled=false)
+                # takes effect immediately for this session without requiring a
+                # process restart.
+                self._disabled = not self._config.enabled
                 # Propagate the reloaded config to the live engine so compaction
                 # reads the user-supplied thresholds (tau_soft, tau_hard, etc.)
                 # rather than the constructor-time defaults.

@@ -148,3 +148,58 @@ class TestEnabledFalseDisablesEngine:
         engine = LcmContextEngine(lcm_config={"enabled": True})
         schemas = engine.get_tool_schemas()
         assert len(schemas) > 0, "get_tool_schemas() returned [] for enabled=True engine"
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 — _disabled re-evaluated when config reloads in on_session_start
+# ---------------------------------------------------------------------------
+
+class TestDisabledFlagOnConfigReload:
+    """on_session_start must re-evaluate _disabled after reloading config.
+
+    Previously only tau_soft/tau_hard/protect_last_n were propagated;
+    _disabled was only set in __init__, so changing lcm.enabled in config.yaml
+    had no effect on a running session.
+    """
+
+    def test_enabled_to_disabled_via_on_session_start(self):
+        """Engine inited with enabled=True, config reloads enabled=False -> _disabled=True."""
+        engine = LcmContextEngine(lcm_config={"enabled": True})
+        assert engine._disabled is False, "precondition: engine starts enabled"
+
+        fake_cfg = {"lcm": {"enabled": "false"}}
+        with patch("hermes_cli.config.load_config", return_value=fake_cfg):
+            engine.on_session_start("s-disable-test")
+
+        assert engine._disabled is True, (
+            f"_disabled={engine._disabled!r} after reloading enabled=False; "
+            "expected True — _disabled was not re-evaluated from the reloaded config"
+        )
+
+    def test_compress_passthrough_when_disabled_via_reload(self):
+        """After reload sets _disabled=True, compress() must be a no-op pass-through."""
+        engine = LcmContextEngine(lcm_config={"enabled": True})
+
+        fake_cfg = {"lcm": {"enabled": "false"}}
+        with patch("hermes_cli.config.load_config", return_value=fake_cfg):
+            engine.on_session_start("s-compress-passthrough")
+
+        msg = {"role": "user", "content": "hello"}
+        result = engine.compress([msg])
+        assert result == [msg], (
+            f"compress() did not pass through unchanged after _disabled=True; got: {result!r}"
+        )
+
+    def test_disabled_to_enabled_via_on_session_start(self):
+        """Engine inited with enabled=False, config reloads enabled=True -> _disabled=False."""
+        engine = LcmContextEngine(lcm_config={"enabled": False})
+        assert engine._disabled is True, "precondition: engine starts disabled"
+
+        fake_cfg = {"lcm": {"enabled": "true"}}
+        with patch("hermes_cli.config.load_config", return_value=fake_cfg):
+            engine.on_session_start("s-enable-test")
+
+        assert engine._disabled is False, (
+            f"_disabled={engine._disabled!r} after reloading enabled=True; "
+            "expected False"
+        )
