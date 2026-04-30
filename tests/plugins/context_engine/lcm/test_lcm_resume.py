@@ -569,3 +569,84 @@ class TestLegacySessionIngestedCount:
             f"Expected {store_after_resume + 10} store entries after adding 10 new "
             f"messages, got {store_after_compress}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — _ingested_count aligned to compacted output after compress()
+# ---------------------------------------------------------------------------
+
+class TestIngestedCountAfterCompaction:
+    """After compress() triggers compaction, _ingested_count must equal the
+    length of the *returned* (compacted) list, not the original input length.
+
+    If the cursor stays at the original input length, the next compress() call
+    computes new_count = len(new_messages) - old_ingested_count, which can be
+    negative, silently skipping fresh turns.
+    """
+
+    def _make_compacting_engine(self) -> "LcmContextEngine":
+        """Return an engine that will compact when given ~100 simple messages."""
+        from unittest.mock import MagicMock
+        config = LcmConfig(
+            enabled=True,
+            tau_soft=0.30,
+            tau_hard=0.60,
+            protect_last_n=4,
+        )
+        outer = LcmContextEngine(lcm_config=config)
+        # Very short context so compaction fires with few messages.
+        outer.context_length = 400
+        outer._engine.token_estimator.config.context_length = 400
+        outer._engine.config = config
+        outer._engine.summarizer.summarize = MagicMock(return_value="MOCK SUMMARY")
+        return outer
+
+    def test_ingested_count_equals_returned_length_after_compaction(self):
+        """_ingested_count == len(result) when compaction fires."""
+        outer = self._make_compacting_engine()
+        # Feed enough messages to trigger auto_compact (blocking path).
+        messages = _make_messages(100)
+        result = outer.compress(messages)
+
+        # Compaction must have fired and shrunk the list.
+        assert len(result) < len(messages), (
+            "Expected compaction to shrink the list — increase message count or "
+            "reduce context_length if this assertion fails."
+        )
+        assert outer._ingested_count == len(result), (
+            f"_ingested_count={outer._ingested_count} but len(result)={len(result)}; "
+            "cursor should track the compacted output length, not the original input"
+        )
+
+    def test_next_compress_ingests_new_turns_after_compaction(self):
+        """After compaction, appending 3 messages and calling compress() must
+        ingest exactly 3 new messages into the store."""
+        outer = self._make_compacting_engine()
+        messages = _make_messages(100)
+        result = outer.compress(messages)
+        store_size_after_first = len(outer._engine.store)
+
+        # Append 3 new messages to the compacted result.
+        new_messages = result + [
+            {"role": "user", "content": "new turn A"},
+            {"role": "assistant", "content": "response A"},
+            {"role": "user", "content": "new turn B"},
+        ]
+        outer.compress(new_messages)
+        store_size_after_second = len(outer._engine.store)
+
+        assert store_size_after_second == store_size_after_first + 3, (
+            f"Expected store to grow by 3 (new turns), but grew by "
+            f"{store_size_after_second - store_size_after_first}; "
+            "new turns were skipped or double-counted"
+        )
+
+    def test_no_compaction_cursor_unchanged(self):
+        """When compaction does NOT fire, _ingested_count == len(messages)."""
+        config = LcmConfig(enabled=True, protect_last_n=2)
+        outer = LcmContextEngine(lcm_config=config)
+        messages = _make_messages(3)  # Far below any threshold
+        outer.compress(messages)
+        assert outer._ingested_count == 3, (
+            f"_ingested_count={outer._ingested_count}, expected 3 when no compaction"
+        )
