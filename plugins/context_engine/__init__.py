@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import logging
 import sys
 from pathlib import Path
@@ -228,7 +229,9 @@ def _load_engine_from_dir(
     if hasattr(mod, "register"):
         collector = _EngineCollector()
         try:
-            mod.register(collector, **kwargs)
+            reg_sig = inspect.signature(mod.register)
+            filtered = _filter_kwargs(kwargs, reg_sig)
+            mod.register(collector, **filtered)
             if collector.engine:
                 return collector.engine
         except Exception as e:
@@ -241,11 +244,31 @@ def _load_engine_from_dir(
         if (isinstance(attr, type) and issubclass(attr, ContextEngine)
                 and attr is not ContextEngine):
             try:
-                return attr(**kwargs)
+                init_sig = inspect.signature(attr.__init__)
+                filtered = _filter_kwargs(kwargs, init_sig)
+                return attr(**filtered)
             except Exception:
                 pass
 
     return None
+
+
+def _filter_kwargs(kwargs: Dict[str, Any], sig: "inspect.Signature") -> Dict[str, Any]:
+    """Return a filtered copy of kwargs accepted by the given signature.
+
+    If the callable declares a **kwargs parameter (VAR_KEYWORD), all kwargs are
+    passed through unchanged — the callee accepts arbitrary keyword arguments.
+    Otherwise only the kwargs whose names appear as explicit parameters are kept.
+    This prevents TypeError when a custom engine's register() does not declare
+    parameters like ``rlm_config`` or ``lcm_config``.
+    """
+    params = sig.parameters
+    # If there's a **kwargs catch-all, pass everything
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    # Otherwise filter to only declared parameter names (excluding 'self'/'ctx')
+    accepted = set(params.keys()) - {"self", "ctx"}
+    return {k: v for k, v in kwargs.items() if k in accepted}
 
 
 class _EngineCollector:
