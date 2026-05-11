@@ -11961,6 +11961,8 @@ class AIAgent:
             SteerDrainMiddleware as _SteerDrainMiddleware,
             StepCallbackMiddleware as _StepCallbackMiddleware,
             SkillNudgeMiddleware as _SkillNudgeMiddleware,
+            MessageSanitizationMiddleware as _MessageSanitizationMiddleware,
+            ApiMessageBuilder as _ApiMessageBuilder,
         )
         _loop_ctx = _LoopContext(max_iterations=self.max_iterations)
         # Sync already-consumed iterations from the budget object.
@@ -11973,7 +11975,17 @@ class AIAgent:
             nudge_interval=getattr(self, "_skill_nudge_interval", 0),
             has_skill_manage="skill_manage" in self.valid_tool_names,
         )
-        _agent_loop = _AgentLoop(_loop_ctx, middlewares=[_mw_steer, _mw_step, _mw_skill])
+        _mw_sanitize = _MessageSanitizationMiddleware(self)
+        _mw_api_builder = _ApiMessageBuilder(
+            self,
+            current_turn_user_idx=current_turn_user_idx,
+            memory_prefetch=_ext_prefetch_cache,
+            plugin_context=_plugin_user_context,
+            memory_fence_fn=build_memory_context_block if _ext_prefetch_cache else None,
+        )
+        _agent_loop = _AgentLoop(_loop_ctx, middlewares=[
+            _mw_sanitize, _mw_steer, _mw_step, _mw_skill, _mw_api_builder,
+        ])
 
         while _agent_loop.context.should_continue() or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
@@ -12019,83 +12031,14 @@ class AIAgent:
             # Delegated to SteerDrainMiddleware
             _mw_steer.before_iteration(_loop_ctx, api_call_count, messages=messages)
 
-            # Prepare messages for API call
-            # If we have an ephemeral system prompt, prepend it to the messages
-            # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
-            # However, providers like Moonshot AI require a separate 'reasoning_content' field
-            # on assistant messages with tool_calls. We handle both cases here.
-            request_logger = getattr(self, "logger", None) or logging.getLogger(__name__)
-            repaired_tool_calls = self._sanitize_tool_call_arguments(
-                messages,
-                logger=request_logger,
-                session_id=self.session_id,
-            )
-            if repaired_tool_calls > 0:
-                request_logger.info(
-                    "Sanitized %s corrupted tool_call arguments before request (session=%s)",
-                    repaired_tool_calls,
-                    self.session_id or "-",
-                )
+            # Message sanitization (tool-call args + role-alternation repair)
+            # Delegated to MessageSanitizationMiddleware
+            _mw_sanitize.before_iteration(_loop_ctx, api_call_count, messages=messages)
 
-            # Defensive: repair malformed role-alternation before API call.
-            # Catches cases where the history got wedged into a
-            # ``tool → user`` or ``user → user`` tail (e.g. after empty-
-            # response scaffolding was stripped and a new user message
-            # landed after an orphan tool result). Most providers return
-            # empty content on malformed sequences, which would otherwise
-            # retrigger the empty-retry loop indefinitely.
-            repaired_seq = self._repair_message_sequence(messages)
-            if repaired_seq > 0:
-                request_logger.info(
-                    "Repaired %s message-alternation violations before request (session=%s)",
-                    repaired_seq,
-                    self.session_id or "-",
-                )
-
-            api_messages = []
-            for idx, msg in enumerate(messages):
-                api_msg = msg.copy()
-
-                # Inject ephemeral context into the current turn's user message.
-                # Sources: memory manager prefetch + plugin pre_llm_call hooks
-                # with target="user_message" (the default).  Both are
-                # API-call-time only — the original message in `messages` is
-                # never mutated, so nothing leaks into session persistence.
-                if idx == current_turn_user_idx and msg.get("role") == "user":
-                    _injections = []
-                    if _ext_prefetch_cache:
-                        _fenced = build_memory_context_block(_ext_prefetch_cache)
-                        if _fenced:
-                            _injections.append(_fenced)
-                    if _plugin_user_context:
-                        _injections.append(_plugin_user_context)
-                    if _injections:
-                        _base = api_msg.get("content", "")
-                        if isinstance(_base, str):
-                            api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
-
-                # For ALL assistant messages, pass reasoning back to the API
-                # This ensures multi-turn reasoning context is preserved
-                self._copy_reasoning_content_for_api(msg, api_msg)
-
-                # Remove 'reasoning' field - it's for trajectory storage only
-                # We've copied it to 'reasoning_content' for the API above
-                if "reasoning" in api_msg:
-                    api_msg.pop("reasoning")
-                # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
-                if "finish_reason" in api_msg:
-                    api_msg.pop("finish_reason")
-                # Strip internal thinking-prefill marker
-                api_msg.pop("_thinking_prefill", None)
-                # Strip Codex Responses API fields (call_id, response_item_id) for
-                # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
-                # Uses new dicts so the internal messages list retains the fields
-                # for Codex Responses compatibility.
-                if self._should_sanitize_tool_calls():
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
-                # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
-                # The signature field helps maintain reasoning continuity
-                api_messages.append(api_msg)
+            # Build API messages (strip internals, inject context, copy reasoning)
+            # Delegated to ApiMessageBuilder
+            _mw_api_builder.before_iteration(_loop_ctx, api_call_count, messages=messages)
+            api_messages = _mw_api_builder.last_api_messages
 
             # Build the final system message: cached prompt + ephemeral system prompt.
             # Ephemeral additions are API-call-time only (not persisted to session DB).

@@ -7,10 +7,15 @@ Phase 3 middleware:
   - SteerDrainMiddleware: pre-API-call /steer injection into tool messages
   - StepCallbackMiddleware: gateway step event emission
   - SkillNudgeMiddleware: skill nudge counter tracking
+
+Phase 4 middleware:
+  - MessageSanitizationMiddleware: tool-call argument + role-alternation repair
+  - ApiMessageBuilder: construct per-API-call message list with context injection
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
@@ -181,3 +186,140 @@ class SkillNudgeMiddleware(MiddlewareBase):
     def reset(self) -> None:
         """Reset the counter (e.g. when skill_manage is actually used)."""
         self.iters_since_skill = 0
+
+
+# ---------------------------------------------------------------------------
+# MessageSanitizationMiddleware (Phase 4)
+# ---------------------------------------------------------------------------
+
+class MessageSanitizationMiddleware(MiddlewareBase):
+    """Sanitize tool-call arguments and repair role-alternation before API calls.
+
+    Mirrors the inline logic at lines 12027-12053 of run_conversation():
+    calls _sanitize_tool_call_arguments and _repair_message_sequence on
+    the messages list before each API call, logging any repairs.
+    """
+
+    def __init__(self, agent: Any, logger: Optional[Any] = None) -> None:
+        self._agent = agent
+        self._logger = logger
+
+    def before_iteration(
+        self,
+        ctx: LoopContext,
+        iteration: int,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        if messages is None:
+            return
+
+        log = self._logger or getattr(self._agent, "logger", None) or logging.getLogger(__name__)
+
+        # Sanitize corrupted tool_call arguments
+        sanitize_fn = getattr(self._agent, "_sanitize_tool_call_arguments", None)
+        if sanitize_fn is not None:
+            repaired_tc = sanitize_fn(
+                messages,
+                logger=log,
+                session_id=getattr(self._agent, "session_id", None),
+            )
+            if repaired_tc > 0:
+                log.info(
+                    "Sanitized %s corrupted tool_call arguments before request (session=%s)",
+                    repaired_tc,
+                    getattr(self._agent, "session_id", None) or "-",
+                )
+
+        # Repair malformed role-alternation
+        repair_fn = getattr(self._agent, "_repair_message_sequence", None)
+        if repair_fn is not None:
+            repaired_seq = repair_fn(messages)
+            if repaired_seq > 0:
+                log.info(
+                    "Repaired %s message-alternation violations before request (session=%s)",
+                    repaired_seq,
+                    getattr(self._agent, "session_id", None) or "-",
+                )
+
+
+# ---------------------------------------------------------------------------
+# ApiMessageBuilder (Phase 4)
+# ---------------------------------------------------------------------------
+
+class ApiMessageBuilder(MiddlewareBase):
+    """Build per-API-call message list with context injection.
+
+    Mirrors the inline logic at lines 12055-12098 of run_conversation():
+    iterates over messages, strips internal fields, copies reasoning,
+    injects memory/plugin context into the user message, and produces
+    a clean api_messages list suitable for the LLM API call.
+
+    The result is stored in ``last_api_messages`` after each before_iteration.
+    """
+
+    def __init__(
+        self,
+        agent: Any,
+        current_turn_user_idx: int = 0,
+        memory_prefetch: str = "",
+        plugin_context: str = "",
+        memory_fence_fn: Optional[Callable] = None,
+    ) -> None:
+        self._agent = agent
+        self._current_turn_user_idx = current_turn_user_idx
+        self._memory_prefetch = memory_prefetch
+        self._plugin_context = plugin_context
+        self._memory_fence_fn = memory_fence_fn
+        self.last_api_messages: List[Dict[str, Any]] = []
+
+    def before_iteration(
+        self,
+        ctx: LoopContext,
+        iteration: int,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        if messages is None:
+            self.last_api_messages = []
+            return
+
+        api_messages = []
+        copy_reasoning_fn = getattr(self._agent, "_copy_reasoning_content_for_api", None)
+        should_sanitize_fn = getattr(self._agent, "_should_sanitize_tool_calls", None)
+        sanitize_fn = getattr(self._agent, "_sanitize_tool_calls_for_strict_api", None)
+
+        for idx, msg in enumerate(messages):
+            api_msg = msg.copy()
+
+            # Inject ephemeral context into the current turn's user message
+            if idx == self._current_turn_user_idx and msg.get("role") == "user":
+                injections = []
+                if self._memory_prefetch:
+                    fenced = self._memory_prefetch
+                    if self._memory_fence_fn is not None:
+                        fenced = self._memory_fence_fn(self._memory_prefetch)
+                    if fenced:
+                        injections.append(fenced)
+                if self._plugin_context:
+                    injections.append(self._plugin_context)
+                if injections:
+                    base = api_msg.get("content", "")
+                    if isinstance(base, str):
+                        api_msg["content"] = base + "\n\n" + "\n\n".join(injections)
+
+            # Copy reasoning content for the API
+            if copy_reasoning_fn is not None:
+                copy_reasoning_fn(msg, api_msg)
+
+            # Strip internal fields
+            api_msg.pop("reasoning", None)
+            api_msg.pop("finish_reason", None)
+            api_msg.pop("_thinking_prefill", None)
+
+            # Strip Codex Responses API fields for strict providers
+            if should_sanitize_fn is not None and should_sanitize_fn():
+                if sanitize_fn is not None:
+                    sanitize_fn(api_msg)
+
+            api_messages.append(api_msg)
+
+        self.last_api_messages = api_messages
