@@ -11963,6 +11963,7 @@ class AIAgent:
             SkillNudgeMiddleware as _SkillNudgeMiddleware,
             MessageSanitizationMiddleware as _MessageSanitizationMiddleware,
             ApiMessageBuilder as _ApiMessageBuilder,
+            ApiMessageFinalizer as _ApiMessageFinalizer,
         )
         _loop_ctx = _LoopContext(max_iterations=self.max_iterations)
         # Sync already-consumed iterations from the budget object.
@@ -11983,8 +11984,14 @@ class AIAgent:
             plugin_context=_plugin_user_context,
             memory_fence_fn=build_memory_context_block if _ext_prefetch_cache else None,
         )
+        _mw_finalizer = _ApiMessageFinalizer(
+            self,
+            active_system_prompt=active_system_prompt,
+            prompt_cache_fn=apply_anthropic_cache_control if getattr(self, "_use_prompt_caching", False) else None,
+            surrogate_sanitize_fn=_sanitize_messages_surrogates,
+        )
         _agent_loop = _AgentLoop(_loop_ctx, middlewares=[
-            _mw_sanitize, _mw_steer, _mw_step, _mw_skill, _mw_api_builder,
+            _mw_sanitize, _mw_steer, _mw_step, _mw_skill, _mw_api_builder, _mw_finalizer,
         ])
 
         while _agent_loop.context.should_continue() or self._budget_grace_call:
@@ -12040,95 +12047,11 @@ class AIAgent:
             _mw_api_builder.before_iteration(_loop_ctx, api_call_count, messages=messages)
             api_messages = _mw_api_builder.last_api_messages
 
-            # Build the final system message: cached prompt + ephemeral system prompt.
-            # Ephemeral additions are API-call-time only (not persisted to session DB).
-            # External recall context is injected into the user message, not the system
-            # prompt, so the stable cache prefix remains unchanged.
-            effective_system = active_system_prompt or ""
-            if self.ephemeral_system_prompt:
-                effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
-            # NOTE: Plugin context from pre_llm_call hooks is injected into the
-            # user message (see injection block above), NOT the system prompt.
-            # This is intentional — system prompt modifications break the prompt
-            # cache prefix.  The system prompt is reserved for Hermes internals.
-            if effective_system:
-                api_messages = [{"role": "system", "content": effective_system}] + api_messages
-
-            # Inject ephemeral prefill messages right after the system prompt
-            # but before conversation history. Same API-call-time-only pattern.
-            if self.prefill_messages:
-                sys_offset = 1 if effective_system else 0
-                for idx, pfm in enumerate(self.prefill_messages):
-                    api_messages.insert(sys_offset + idx, pfm.copy())
-
-            # Apply Anthropic prompt caching for Claude models on native
-            # Anthropic, OpenRouter, and third-party Anthropic-compatible
-            # gateways. Auto-detected: if ``_use_prompt_caching`` is set,
-            # inject cache_control breakpoints (system + last 3 messages)
-            # to reduce input token costs by ~75% on multi-turn
-            # conversations. Layout is chosen per endpoint by
-            # ``_anthropic_prompt_cache_policy``.
-            if self._use_prompt_caching:
-                api_messages = apply_anthropic_cache_control(
-                    api_messages,
-                    cache_ttl=self._cache_ttl,
-                    native_anthropic=self._use_native_cache_layout,
-                )
-
-            # Safety net: strip orphaned tool results / add stubs for missing
-            # results before sending to the API.  Runs unconditionally — not
-            # gated on context_compressor — so orphans from session loading or
-            # manual message manipulation are always caught.
-            api_messages = self._sanitize_api_messages(api_messages)
-
-            # Drop thinking-only assistant turns (reasoning but no visible
-            # output and no tool_calls) and merge any adjacent user messages
-            # left behind. Prevents Anthropic 400s ("The final block in an
-            # assistant message cannot be `thinking`.") and equivalent errors
-            # from third-party Anthropic-compatible gateways that can't replay
-            # a thinking-only turn. Runs on the per-call copy only — the
-            # stored conversation history keeps the reasoning block for the
-            # UI transcript and session persistence.
-            api_messages = self._drop_thinking_only_and_merge_users(api_messages)
-
-            # Normalize message whitespace and tool-call JSON for consistent
-            # prefix matching.  Ensures bit-perfect prefixes across turns,
-            # which enables KV cache reuse on local inference servers
-            # (llama.cpp, vLLM, Ollama) and improves cache hit rates for
-            # cloud providers.  Operates on api_messages (the API copy) so
-            # the original conversation history in `messages` is untouched.
-            for am in api_messages:
-                if isinstance(am.get("content"), str):
-                    am["content"] = am["content"].strip()
-            for am in api_messages:
-                tcs = am.get("tool_calls")
-                if not tcs:
-                    continue
-                new_tcs = []
-                for tc in tcs:
-                    if isinstance(tc, dict) and "function" in tc:
-                        try:
-                            args_obj = json.loads(tc["function"]["arguments"])
-                            tc = {**tc, "function": {
-                                **tc["function"],
-                                "arguments": json.dumps(
-                                    args_obj, separators=(",", ":"),
-                                    sort_keys=True,
-                                ),
-                            }}
-                        except Exception:
-                            tc["function"]["arguments"] = _repair_tool_call_arguments(
-                                tc["function"]["arguments"],
-                                tc["function"].get("name", "?"),
-                            )
-                    new_tcs.append(tc)
-                am["tool_calls"] = new_tcs
-
-            # Proactively strip any surrogate characters before the API call.
-            # Models served via Ollama (Kimi K2.5, GLM-5, Qwen) can return
-            # lone surrogates (U+D800-U+DFFF) that crash json.dumps() inside
-            # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
-            _sanitize_messages_surrogates(api_messages)
+            # Finalize API messages (system prompt, prefill, caching, sanitize,
+            # drop thinking-only, normalize, strip surrogates).
+            # Delegated to ApiMessageFinalizer
+            _mw_finalizer.before_iteration(_loop_ctx, api_call_count, messages=api_messages)
+            api_messages = _mw_finalizer.last_finalized_messages
 
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)

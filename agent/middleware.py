@@ -323,3 +323,124 @@ class ApiMessageBuilder(MiddlewareBase):
             api_messages.append(api_msg)
 
         self.last_api_messages = api_messages
+
+
+# ---------------------------------------------------------------------------
+# ApiMessageFinalizer (Phase 5)
+# ---------------------------------------------------------------------------
+
+class ApiMessageFinalizer(MiddlewareBase):
+    """Finalize the API message list before the LLM call.
+
+    Mirrors the inline logic at lines 12043-12131 of run_conversation():
+    - Prepends system prompt (base + ephemeral)
+    - Injects prefill messages after system prompt
+    - Applies Anthropic prompt caching if configured
+    - Calls _sanitize_api_messages (orphan tool result cleanup)
+    - Calls _drop_thinking_only_and_merge_users
+    - Strips content whitespace for consistent KV cache prefixes
+    - Normalizes tool_call JSON to sorted compact form
+    - Strips surrogate characters
+
+    Operates on a copy -- never mutates the input messages.
+    """
+
+    def __init__(
+        self,
+        agent: Any,
+        active_system_prompt: str = "",
+        prompt_cache_fn: Optional[Callable] = None,
+        surrogate_sanitize_fn: Optional[Callable] = None,
+    ) -> None:
+        self._agent = agent
+        self._active_system_prompt = active_system_prompt
+        self._prompt_cache_fn = prompt_cache_fn
+        self._surrogate_sanitize_fn = surrogate_sanitize_fn
+        self.last_finalized_messages: List[Dict[str, Any]] = []
+
+    def before_iteration(
+        self,
+        ctx: LoopContext,
+        iteration: int,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        if messages is None:
+            self.last_finalized_messages = []
+            return
+
+        import copy as _copy
+        import json as _json
+
+        api_messages = _copy.deepcopy(messages)
+
+        # System prompt assembly
+        effective_system = self._active_system_prompt or ""
+        ephemeral = getattr(self._agent, "ephemeral_system_prompt", "")
+        if ephemeral:
+            effective_system = (effective_system + "\n\n" + ephemeral).strip()
+
+        if effective_system:
+            api_messages.insert(0, {"role": "system", "content": effective_system})
+
+        # Prefill messages
+        prefill = getattr(self._agent, "prefill_messages", None)
+        if prefill:
+            sys_offset = 1 if effective_system else 0
+            for idx, pfm in enumerate(prefill):
+                api_messages.insert(sys_offset + idx, pfm.copy())
+
+        # Prompt caching
+        if getattr(self._agent, "_use_prompt_caching", False) and self._prompt_cache_fn:
+            api_messages = self._prompt_cache_fn(
+                api_messages,
+                cache_ttl=getattr(self._agent, "_cache_ttl", None),
+                native_anthropic=getattr(self._agent, "_use_native_cache_layout", False),
+            )
+
+        # Sanitize orphaned tool results
+        sanitize_fn = getattr(self._agent, "_sanitize_api_messages", None)
+        if sanitize_fn is not None:
+            api_messages = sanitize_fn(api_messages)
+
+        # Drop thinking-only assistant turns
+        drop_fn = getattr(self._agent, "_drop_thinking_only_and_merge_users", None)
+        if drop_fn is not None:
+            api_messages = drop_fn(api_messages)
+
+        # Strip content whitespace
+        for am in api_messages:
+            if isinstance(am.get("content"), str):
+                am["content"] = am["content"].strip()
+
+        # Normalize tool_call JSON
+        repair_fn = getattr(self._agent, "_repair_tool_call_arguments", None)
+        for am in api_messages:
+            tcs = am.get("tool_calls")
+            if not tcs:
+                continue
+            new_tcs = []
+            for tc in tcs:
+                if isinstance(tc, dict) and "function" in tc:
+                    try:
+                        args_obj = _json.loads(tc["function"]["arguments"])
+                        tc = {**tc, "function": {
+                            **tc["function"],
+                            "arguments": _json.dumps(
+                                args_obj, separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                        }}
+                    except Exception:
+                        if repair_fn is not None:
+                            tc["function"]["arguments"] = repair_fn(
+                                tc["function"]["arguments"],
+                                tc["function"].get("name", "?"),
+                            )
+                new_tcs.append(tc)
+            am["tool_calls"] = new_tcs
+
+        # Strip surrogate characters
+        if self._surrogate_sanitize_fn is not None:
+            self._surrogate_sanitize_fn(api_messages)
+
+        self.last_finalized_messages = api_messages
