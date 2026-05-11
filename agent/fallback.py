@@ -14,6 +14,9 @@ import time
 
 from agent.error_classifier import FailoverReason
 
+# Re-export utilities for mixin method access
+from agent.utils import *  # noqa: F401,F403
+
 logger = logging.getLogger(__name__)
 
 

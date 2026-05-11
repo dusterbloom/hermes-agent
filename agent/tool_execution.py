@@ -15,6 +15,9 @@ import threading
 import time
 import logging
 
+# Re-export utilities for mixin method access
+from agent.utils import *  # noqa: F401,F403
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,9 +114,6 @@ class ToolExecutionMixin:
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                 skip_pre_tool_call_hook=True,
             )
-
-    @staticmethod
-
 
     def _apply_pending_steer_to_tool_results(self, messages: list, num_tool_msgs: int) -> None:
         """Append any pending /steer text to the last tool result in this turn.

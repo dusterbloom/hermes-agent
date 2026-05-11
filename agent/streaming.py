@@ -12,13 +12,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from agent.memory_manager import sanitize_context
+from agent.model_metadata import is_local_endpoint, save_context_length
 from tools.interrupt import set_interrupt as _set_interrupt
+
+# Re-export all utilities from agent.utils so streaming methods can access
+# module-level names that were originally local imports in AIAgent.
+from agent.utils import *  # noqa: F401,F403
 
 logger = logging.getLogger(__name__)
 

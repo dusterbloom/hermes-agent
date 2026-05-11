@@ -14,6 +14,9 @@ import os
 import threading
 import time
 
+# Re-export utilities for mixin method access
+from agent.utils import *  # noqa: F401,F403
+
 logger = logging.getLogger(__name__)
 
 
@@ -356,9 +359,6 @@ class SessionMixin:
         "genuinely nothing stands out on either, say 'Nothing to save.' "
         "and stop — but don't reach for that conclusion as a default."
     )
-
-    @staticmethod
-
 
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
